@@ -1,0 +1,6 @@
+app_name: "crypto-mm"
+heartbeat_ms: 500
+log_level: "INFO"
+exchange_name: "KRAKEN"
+data_dir: "data"
+plot_output_dir: "plots"
