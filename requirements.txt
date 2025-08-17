@@ -7,5 +7,6 @@ pandas>=2.2
 numpy>=1.26
 matplotlib>=3.9
 pytest>=8.2
+pytest-asyncio>=0.23
 ruff>=0.5
 typing-extensions>=4.12

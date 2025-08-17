@@ -10,7 +10,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from websockets.client import connect as ws_connect
+from websockets import connect as ws_connect
 from websockets.legacy.client import WebSocketClientProtocol
 
 from ..core.config import Settings, load_settings
