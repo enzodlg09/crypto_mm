@@ -4,23 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="da36cbe6-0af8-4316-a605-c4dd6208fdbc" name="Changes" comment="test">
-      <change afterPath="$PROJECT_DIR$/crypto_mm/data/order_book.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/crypto_mm/data/trade_tape.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/pytests.ini" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/conftest.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_live_view.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_order_book.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_trade_tape.py" afterDir="false" />
+    <list default="true" id="da36cbe6-0af8-4316-a605-c4dd6208fdbc" name="Changes" comment="stream data orderbook, restart from 7">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Makefile" beforeDir="false" afterPath="$PROJECT_DIR$/Makefile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/config.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/crypto_mm/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/core/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/crypto_mm/data/ws_client.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/data/ws_client.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/crypto_mm/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/example.env" beforeDir="false" afterPath="$PROJECT_DIR$/example.env" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -73,7 +61,7 @@
       <recent name="C:\Users\enzom\PycharmProjects\crypto_mm\crypto_mm" />
     </key>
   </component>
-  <component name="RunManager" selected="Makefile Target.test">
+  <component name="RunManager" selected="Python.main">
     <configuration name="run" type="MAKEFILE_TARGET_RUN_CONFIGURATION" factoryName="Makefile" temporary="true">
       <makefile filename="$PROJECT_DIR$/Makefile" target="run" workingDirectory="" arguments="">
         <envs />
@@ -132,7 +120,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1755441197825</updated>
-      <workItem from="1755441203136" duration="9688000" />
+      <workItem from="1755441203136" duration="13570000" />
     </task>
     <task id="LOCAL-00001" summary="test">
       <option name="closed" value="true" />
@@ -142,7 +130,15 @@
       <option name="project" value="LOCAL" />
       <updated>1755445386789</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="stream data orderbook, restart from 7">
+      <option name="closed" value="true" />
+      <created>1755451063619</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1755451063620</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -150,7 +146,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="test" />
-    <option name="LAST_COMMIT_MESSAGE" value="test" />
+    <MESSAGE value="stream data orderbook, restart from 7" />
+    <option name="LAST_COMMIT_MESSAGE" value="stream data orderbook, restart from 7" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/crypto_mm$main.coverage" NAME="main Coverage Results" MODIFIED="1755446766518" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/crypto_mm" />

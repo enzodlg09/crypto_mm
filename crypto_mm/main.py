@@ -34,7 +34,7 @@ try:
     from .core.types import utc_now_iso
     from .data.ws_client import KrakenWSV2Client, ResyncRequired
     from .data.order_book import OrderBookL2
-    from .ui.live_view import LiveState, render, stop_render, log_event
+    from .ui.live_view import LiveState, render, stop_render, log_event, RenderOptions
 except Exception:  # pragma: no cover - fallback pour exécution directe
     import pathlib
 
@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover - fallback pour exécution directe
     from crypto_mm.core.types import utc_now_iso  # type: ignore
     from crypto_mm.data.ws_client import KrakenWSV2Client, ResyncRequired  # type: ignore
     from crypto_mm.data.order_book import OrderBookL2  # type: ignore
-    from crypto_mm.ui.live_view import LiveState, render, stop_render, log_event  # type: ignore
+    from crypto_mm.ui.live_view import LiveState, render, stop_render, log_event, RenderOptions  # type: ignore
 
 
 # ---------- Parser ----------
@@ -108,7 +108,17 @@ def build_parser(*, extras: Optional[bool] = False) -> argparse.ArgumentParser:
         p_livews.add_argument("--depth", type=int, default=10)
         p_livews.add_argument("--min-size", type=float, default=0.0)
         p_livews.add_argument("--duration", type=float, default=20.0)
-
+        p_livews.add_argument("--events", dest="events", action="store_true",
+                              help="Show right panel as EVENTS instead of LAST TRADES.")
+        p_livews.add_argument("--no-events", dest="events", action="store_false")
+        p_livews.set_defaults(events=False)
+        p_livews.add_argument("--color", dest="color", action="store_true")
+        p_livews.add_argument("--no-color", dest="color", action="store_false")
+        p_livews.add_argument("--ladder-mode", choices=["summary", "levels", "off"],
+                              default="summary", help="Ladder display mode.")
+        p_livews.add_argument("--ladder-levels", type=int, default=6,
+                              help="Max levels per side when ladder-mode=levels.")
+        p_livews.set_defaults(color=True)
     return parser
 
 
@@ -381,33 +391,45 @@ async def _ws_book_ladder_async(settings: Settings, pair: str, duration: float, 
     return 0
 
 
-async def _ws_live_async(settings: Settings, pair: str, duration: float, depth: int, min_size: float) -> int:
+async def _ws_live_async(
+    settings: Settings,
+    pair: str,
+    duration: float,
+    depth: int,
+    min_size: float,
+    *,
+    show_events: bool,
+    color: bool,
+    ladder_mode: str,
+    ladder_levels: int,
+) -> int:
     """
     Vue TTY complète (book stateful + trade tape) rafraîchie toutes heartbeat_ms (~500 ms).
-    Affiche le book à gauche et un event-log à droite (snapshots, resync, derniers trades).
+    Left panel: OrderBook; Right panel: Events OR Last trades.
     """
     logger = get_logger("ws-live", settings.log_level)
 
-    # Taisons les logs verbeux dans la console : on garde stderr pour erreurs
+    # Taisons les logs verbeux dans la console UI
     import logging
+    logger.setLevel(logging.ERROR)
+    logger.propagate = False
     for h in list(logger.handlers):
         if getattr(h, "stream", None) is sys.stdout:
             h.stream = sys.stderr
-    logger.setLevel(logging.ERROR)
 
     client = KrakenWSV2Client(settings=settings, logger=logger)
 
-    # Crée des loggers "quiet" pour les sous-composants (évite les JSON qui polluent l'UI)
     ob_logger = get_logger("ws-live.ob", settings.log_level)
     tape_logger = get_logger("ws-live.tape", settings.log_level)
     for lg in (ob_logger, tape_logger):
+        lg.setLevel(logging.ERROR)
+        lg.propagate = False
         for h in list(lg.handlers):
             if getattr(h, "stream", None) is sys.stdout:
                 h.stream = sys.stderr
-        lg.setLevel(logging.ERROR)
 
     ob = OrderBookL2(logger=ob_logger)
-    from crypto_mm.data.trade_tape import TradeTape  # import local
+    from crypto_mm.data.trade_tape import TradeTape  # local import
     tape = TradeTape(capacity=2000, logger=tape_logger)
     state = LiveState(pair=pair, order_book=ob, trade_tape=tape, depth=depth, min_size=min_size)
 
@@ -422,8 +444,7 @@ async def _ws_live_async(settings: Settings, pair: str, duration: float, depth: 
                         log_event(f"snapshot seq={msg.seq}")
                     else:
                         ob.apply_delta(msg)
-                        # on ne spam pas chaque delta; on peut échantillonner…
-                # fin du for
+                # boucle terminée (déco) -> resouscrire
             except ResyncRequired as e:
                 log_event(f"RESYNC required: {e}")
                 ob.clear()
@@ -432,7 +453,9 @@ async def _ws_live_async(settings: Settings, pair: str, duration: float, depth: 
     async def trades_task():
         async for tr in client.subscribe_trades(pair):
             tape.push(tr)
-            # le render() affichera le dernier trade en event automatiquement
+            if show_events:
+                # le panneau events ajoute déjà 'trade' via renderer; ici on peut filtrer/spécifier
+                pass
 
     t1 = asyncio.create_task(book_task())
     t2 = asyncio.create_task(trades_task())
@@ -441,7 +464,13 @@ async def _ws_live_async(settings: Settings, pair: str, duration: float, depth: 
     try:
         while (time.perf_counter() - start) < duration:
             await asyncio.sleep(settings.heartbeat_ms / 1000.0)
-            render(state, out=sys.stdout)  # mise à jour incrémentale (pas d’effacement total)
+            opts = RenderOptions(
+                show_events=show_events,
+                color=color,
+                ladder_mode=ladder_mode,
+                ladder_levels=ladder_levels,
+            )
+            render(state, out=sys.stdout, opts=opts)
     except KeyboardInterrupt:
         log_event("KeyboardInterrupt")
     finally:
@@ -475,8 +504,31 @@ def cmd_ws_book_ladder(settings: Settings, pair: str, duration: float, depth: in
     return asyncio.run(_ws_book_ladder_async(settings, pair, duration, depth, min_size))
 
 
-def cmd_ws_live(settings: Settings, pair: str, duration: float, depth: int, min_size: float) -> int:
-    return asyncio.run(_ws_live_async(settings, pair, duration, depth, min_size))
+def cmd_ws_live(
+    settings: Settings,
+    pair: str,
+    duration: float,
+    depth: int,
+    min_size: float,
+    *,
+    show_events: bool,
+    color: bool,
+    ladder_mode: str,
+    ladder_levels: int,
+) -> int:
+    return asyncio.run(
+        _ws_live_async(
+            settings,
+            pair,
+            duration,
+            depth,
+            min_size,
+            show_events=show_events,
+            color=color,
+            ladder_mode=ladder_mode,
+            ladder_levels=ladder_levels,
+        )
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -508,7 +560,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cmd == "ws-book-ladder":
         return cmd_ws_book_ladder(settings, pair=args.pair, duration=args.duration, depth=args.depth, min_size=args.min_size)
     if args.cmd == "ws-live":
-        return cmd_ws_live(settings, pair=args.pair, duration=args.duration, depth=args.depth, min_size=args.min_size)
+        return cmd_ws_live(
+            settings,
+            pair=args.pair,
+            duration=args.duration,
+            depth=args.depth,
+            min_size=args.min_size,
+            show_events=args.events,
+            color=args.color,
+            ladder_mode=args.ladder_mode,
+            ladder_levels=args.ladder_levels,
+        )
 
     parser.print_help()
     return 1
