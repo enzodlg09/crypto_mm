@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Deque, List, Optional, TextIO, Tuple
+from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional, TextIO, Tuple
 
 from ..core.types import utc_now_iso
 from ..data.order_book import OrderBookL2
 from ..data.trade_tape import TradeTape, TradeRecord
+from ..mm.spread_kpi import KpiStore, spread_for_size
+from ..mm.fair_price import FairPrice
 
 
 @dataclass
@@ -19,6 +22,12 @@ class LiveState:
     trade_tape: TradeTape
     depth: int = 10
     min_size: float = 0.0
+    # KPI spreads + fair price (gauche)
+    kpi_store: KpiStore = KpiStore(window_s=300)
+    kpi_sizes: Tuple[float, ...] = (0.1, 1.0, 5.0, 10.0)
+    fair: FairPrice = FairPrice(mode="microprice", alpha=0.5)
+    # Fair prices spécifiques au panneau events (ewma a besoin d'état persistant)
+    fair_events: Dict[str, FairPrice] = field(default_factory=dict)
 
 
 @dataclass
@@ -28,6 +37,10 @@ class RenderOptions:
     color: bool = True          # ANSI colors on/off
     ladder_mode: str = "summary"  # 'summary' | 'levels' | 'off'
     ladder_levels: int = 6        # used when ladder_mode == 'levels'
+    # --- Nouveaux réglages pour fair prices dans le panneau Events ---
+    events_fp_modes: Tuple[str, ...] = ()  # ex: ("mid","micro","ewma")
+    fp_alpha: float = 0.5                   # microprice alpha
+    fp_lambda: float = 1.0                  # ewma lambda (/s)
 
 
 # ---------- small formatting helpers ----------
@@ -76,8 +89,8 @@ class _EventRow:
 class LiveRenderer:
     """
     Two-panel single-window renderer using ANSI cursor addressing.
-    Left: OrderBook (top10, metrics, ladder)
-    Right: Event log OR Last trades
+    Left: OrderBook (top10, metrics, ladder/KPIs)
+    Right: Event log OR Last trades (+ fair prices si demandé)
     """
 
     # Layout (1-based)
@@ -98,9 +111,9 @@ class LiveRenderer:
     ROW_METRICS = 15
     ROW_SEP2 = 16
 
-    ROW_LADDER_TITLE = 17
-    ROW_LADDER_BIDS = 18
-    ROW_LADDER_ASKS = 19
+    ROW_L1 = 17               # nous réutilisons L1/L2/L3 pour KPI + fair price
+    ROW_L2 = 18
+    ROW_L3 = 19
 
     ROW_SEP3 = 20
 
@@ -114,7 +127,6 @@ class LiveRenderer:
     RIGHT_SIDE_W = 5
     RIGHT_QTY_W = 10
     RIGHT_PX_W = 14
-    # message width is computed from available space
 
     # Regex pour parser "trade buy 0.001 @ 116,000.00"
     _TRADE_RE = re.compile(
@@ -149,8 +161,6 @@ class LiveRenderer:
         self._w(_goto(self.ROW_SEP1, 1) + "=" * self.WIDTH_TOTAL + _clear_line_right())
         title_left = _c("36", "ORDER BOOK — TOP 10 (cumulative sizes)", self.opts.color)  # cyan
         self._w(_goto(self.ROW_TITLES, self.LEFT_COL) + f"{title_left}" + _clear_line_right())
-
-        # Right title placeholder (set on update depending on mode)
         self._w(_goto(self.ROW_TITLES, self.RIGHT_COL) + _clear_line_right())
 
         # LHS headers
@@ -163,12 +173,11 @@ class LiveRenderer:
             self._w(_goto(r, self.LEFT_COL) + _clear_line_right())
         self._w(_goto(self.ROW_METRICS, self.LEFT_COL) + _clear_line_right())
         self._w(_goto(self.ROW_SEP2, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
-        self._w(_goto(self.ROW_LADDER_TITLE, self.LEFT_COL) + _clear_line_right())
-        self._w(_goto(self.ROW_LADDER_BIDS, self.LEFT_COL) + _clear_line_right())
-        self._w(_goto(self.ROW_LADDER_ASKS, self.LEFT_COL) + _clear_line_right())
+        for r in (self.ROW_L1, self.ROW_L2, self.ROW_L3):
+            self._w(_goto(r, self.LEFT_COL) + _clear_line_right())
         self._w(_goto(self.ROW_SEP3, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
 
-        # Right panel title & clear area
+        # Right panel clear area
         for r in range(self.ROW_RIGHT_START, self.ROW_RIGHT_END + 1):
             self._w(_goto(r, self.RIGHT_COL) + _clear_line_right())
 
@@ -255,33 +264,35 @@ class LiveRenderer:
         metrics = f"Spread: {spread_str}   |   Mid: {mid_str}   |   Microprice: {micro_str}"
         self._w(_goto(self.ROW_METRICS, self.LEFT_COL) + _c("36", metrics, self.opts.color) + _clear_line_right())
 
-        # Ladder (summary by défaut)
-        ladder = ob.ladder(depth=state.depth, min_size=state.min_size)
-        bids_f = ladder["bids"]; asks_f = ladder["asks"]
-        if self.opts.ladder_mode == "off":
-            title = _c("1", f"LADDER (hidden)", self.opts.color)
-            self._w(_goto(self.ROW_LADDER_TITLE, self.LEFT_COL) + title + _clear_line_right())
-            self._w(_goto(self.ROW_LADDER_BIDS, self.LEFT_COL) + _clear_line_right())
-            self._w(_goto(self.ROW_LADDER_ASKS, self.LEFT_COL) + _clear_line_right())
-        elif self.opts.ladder_mode == "summary":
-            title = _c("1", f"LADDER (min_size={state.min_size}, depth={state.depth})", self.opts.color)
-            self._w(_goto(self.ROW_LADDER_TITLE, self.LEFT_COL) + title + _clear_line_right())
-            nb, na = len(bids_f), len(asks_f)
-            sum_b = sum(q for _, q in bids_f); sum_a = sum(q for _, q in asks_f)
-            b_range = f"{int(bids_f[-1][0])}..{int(bids_f[0][0])}" if nb else "—"
-            a_range = f"{int(asks_f[0][0])}..{int(asks_f[-1][0])}" if na else "—"
-            line_b = f"BIDS ≥{state.min_size}: lvls={nb:<3} sum={_fmt_qty(sum_b)} BTC | range {b_range}"
-            line_a = f"ASKS ≥{state.min_size}: lvls={na:<3} sum={_fmt_qty(sum_a)} BTC | range {a_range}"
-            self._w(_goto(self.ROW_LADDER_BIDS, self.LEFT_COL) + line_b[:self.LEFT_WIDTH] + _clear_line_right())
-            self._w(_goto(self.ROW_LADDER_ASKS, self.LEFT_COL) + line_a[:self.LEFT_WIDTH] + _clear_line_right())
-        else:
-            title = _c("1", f"LADDER (min_size={state.min_size}, depth={state.depth}, levels={self.opts.ladder_levels})", self.opts.color)
-            self._w(_goto(self.ROW_LADDER_TITLE, self.LEFT_COL) + title + _clear_line_right())
-            nb = max(0, self.opts.ladder_levels)
-            btxt = " ".join(f"{int(p)}@{_fmt_qty(q)}" for p, q in bids_f[:nb]) or "—"
-            atxt = " ".join(f"{int(p)}@{_fmt_qty(q)}" for p, q in asks_f[:nb]) or "—"
-            self._w(_goto(self.ROW_LADDER_BIDS, self.LEFT_COL) + f"BIDS: {btxt}"[:self.LEFT_WIDTH] + _clear_line_right())
-            self._w(_goto(self.ROW_LADDER_ASKS, self.LEFT_COL) + f"ASKS: {atxt}"[:self.LEFT_WIDTH] + _clear_line_right())
+        # --- KPI spreads exécutables @ tailles fixes + Fair price (gauche) ---
+        book = {"bids": bids, "asks": asks}
+        now = time.time()
+        inst_spreads = []
+        for s in state.kpi_sizes:
+            spr = spread_for_size(book, s)
+            state.kpi_store.append(now, s, spr)
+            inst_spreads.append(spr)
+
+        agg = state.kpi_store.aggregates(now_epoch=now)
+        med_map = {float(idx): float(agg.loc[idx, "median"]) for idx in agg.index} if not agg.empty else {}
+
+        def _fmt_s(x: Optional[float]) -> str:
+            return "—" if x is None else f"${x:,.2f}"
+
+        inst_line = " | ".join(f"{s:g} BTC: {_fmt_s(v)}" for s, v in zip(state.kpi_sizes, inst_spreads))
+        med_line = " | ".join(f"{s:g} BTC: {_fmt_s(med_map.get(float(s)))}" for s in state.kpi_sizes)
+
+        self._w(_goto(self.ROW_SEP2, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
+        self._w(_goto(self.ROW_L1, self.LEFT_COL) +
+                _c("1", "EXEC SPREADS (instant)", self.opts.color) + "  " + inst_line[:self.LEFT_WIDTH] + _clear_line_right())
+        self._w(_goto(self.ROW_L2, self.LEFT_COL) +
+                _c("1", "EXEC SPREADS (5m median)", self.opts.color) + "  " + med_line[:self.LEFT_WIDTH] + _clear_line_right())
+
+        fair = state.fair.compute(book)
+        fair_txt = _fmt_price(fair) if fair is not None else "—"
+        fp_mode = state.fair.mode
+        self._w(_goto(self.ROW_L3, self.LEFT_COL) +
+                f"Fair price [{fp_mode}]: {fair_txt}"[:self.LEFT_WIDTH] + _clear_line_right())
 
         # ---------- Right panel ----------
         width = self.WIDTH_TOTAL - self.RIGHT_COL - 1
@@ -298,22 +309,62 @@ class LiveRenderer:
             self._w(_goto(self.ROW_TITLES, self.RIGHT_COL) + title + _clear_line_right())
             self._w(_goto(self.ROW_RIGHT_TITLE, self.RIGHT_COL) + hdr + _clear_line_right())
 
+            # --- FAIR PRICES en haut du panneau events (configurable) ---
+            # Réserve quelques lignes pour afficher mid/micro/ewma avec les mêmes colonnes.
+            fair_lines = 0
+            modes = tuple(m.lower() for m in self.opts.events_fp_modes if m)
+            if modes:
+                for i, m in enumerate(modes):
+                    # Prépare/maintient l'instance si ewma
+                    if m == "ewma":
+                        inst = state.fair_events.get("ewma")
+                        if inst is None:
+                            inst = FairPrice(mode="ewma_mid", lambda_=self.opts.fp_lambda)
+                            state.fair_events["ewma"] = inst
+                        val = inst.compute(book)
+                        msg = f"λ={self.opts.fp_lambda:g}"
+                    elif m in ("micro", "microprice"):
+                        inst = FairPrice(mode="microprice", alpha=self.opts.fp_alpha)
+                        val = inst.compute(book)
+                        msg = f"α={self.opts.fp_alpha:g}"
+                        m = "micro"
+                    elif m == "mid":
+                        inst = FairPrice(mode="mid")
+                        val = inst.compute(book)
+                        msg = ""
+                    else:
+                        val = None
+                        msg = ""
+
+                    typ = _c("36", f"fair:{m}", self.opts.color)
+                    price_txt = _fmt_price(val) if val is not None else ""
+                    # ligne alignée avec le tableau events
+                    line = (
+                        f"{'':<{self.RIGHT_TS_W}} "
+                        f"{typ:<{self.RIGHT_TYPE_W}} "
+                        f"{'':<{self.RIGHT_SIDE_W}} "
+                        f"{'':>{self.RIGHT_QTY_W}} "
+                        f"{price_txt:>{self.RIGHT_PX_W}}  {msg}"
+                    )
+                    self._w(_goto(self.ROW_RIGHT_START + fair_lines, self.RIGHT_COL) + line[:width] + _clear_line_right())
+                    fair_lines += 1
+
             # auto-append last trade as an event (dedup by trade_id)
             last_trs: List[TradeRecord] = tape.last(1)
             if last_trs:
                 tr = last_trs[-1]
                 if tr.trade_id != self._last_trade_event_id:
-                    # structured string parsable by add_event (keeps interface simple)
                     self.add_event(f"trade {tr.side} { _fmt_qty(tr.qty_btc) } @ {_fmt_price(tr.price_usd_per_btc)}")
                     self._last_trade_event_id = tr.trade_id
 
             # render events table (newest at bottom)
             lines: List[_EventRow] = list(self.events)
-            nrows = self.ROW_RIGHT_END - self.ROW_RIGHT_START + 1
-            if len(lines) < nrows:
-                lines = [_EventRow("", "", "")] * (nrows - len(lines)) + lines
+            nrows_total = self.ROW_RIGHT_END - self.ROW_RIGHT_START + 1
+            nrows_events = max(0, nrows_total - fair_lines)
+            if len(lines) < nrows_events:
+                lines = [_EventRow("", "", "")] * (nrows_events - len(lines)) + lines
             else:
-                lines = lines[-nrows:]
+                lines = lines[-nrows_events:]
 
             MSG_W = max(
                 0,
@@ -322,17 +373,15 @@ class LiveRenderer:
                 - self.RIGHT_TYPE_W - 1
                 - self.RIGHT_SIDE_W - 1
                 - self.RIGHT_QTY_W - 1
-                - self.RIGHT_PX_W - 2,  # extra space before msg
+                - self.RIGHT_PX_W - 2,
             )
 
-            for idx in range(nrows):
-                row = self.ROW_RIGHT_START + idx
+            for idx in range(nrows_events):
+                row = self.ROW_RIGHT_START + fair_lines + idx
                 ev = lines[idx]
-                # type color
                 color_code = {"trade": "35", "snapshot": "36", "resync": "33", "info": "37"}.get(ev.etype, "37")
                 typ = _c(color_code, ev.etype or "", self.opts.color)
 
-                # side color
                 if ev.side == "buy":
                     side = _c("32", "buy", self.opts.color)
                 elif ev.side == "sell":
@@ -342,7 +391,7 @@ class LiveRenderer:
 
                 qty = _fmt_qty(ev.qty) if ev.qty is not None else ""
                 px = _fmt_price(ev.price) if ev.price is not None else ""
-                msg = ev.msg[:MSG_W] if ev.msg else ""
+                msg = (ev.msg or "")[:MSG_W]
 
                 line = (
                     f"{(ev.ts or ''):<{self.RIGHT_TS_W}} "
@@ -360,7 +409,6 @@ class LiveRenderer:
             self._w(_goto(self.ROW_TITLES, self.RIGHT_COL) + title + _clear_line_right())
             self._w(_goto(self.ROW_RIGHT_TITLE, self.RIGHT_COL) + hdr + _clear_line_right())
 
-            # show last N trades (fit the right panel height)
             nrows = self.ROW_RIGHT_END - self.ROW_RIGHT_START + 1
             lastn: List[TradeRecord] = tape.last(nrows)
             lastn = lastn[-nrows:]

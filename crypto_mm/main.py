@@ -35,6 +35,7 @@ try:
     from .data.ws_client import KrakenWSV2Client, ResyncRequired
     from .data.order_book import OrderBookL2
     from .ui.live_view import LiveState, render, stop_render, log_event, RenderOptions
+    from .mm.fair_price import FairPrice
 except Exception:  # pragma: no cover - fallback pour exécution directe
     import pathlib
 
@@ -49,20 +50,19 @@ except Exception:  # pragma: no cover - fallback pour exécution directe
     from crypto_mm.data.ws_client import KrakenWSV2Client, ResyncRequired  # type: ignore
     from crypto_mm.data.order_book import OrderBookL2  # type: ignore
     from crypto_mm.ui.live_view import LiveState, render, stop_render, log_event, RenderOptions  # type: ignore
+    from crypto_mm.mm.fair_price import FairPrice
 
 
 # ---------- Parser ----------
 
-def build_parser(*, extras: Optional[bool] = False) -> argparse.ArgumentParser:
+def build_parser(*, extras: Optional[bool] = None) -> argparse.ArgumentParser:
     """
-    Construire le parser CLI.
+    Crée le parser CLI.
+    - extras: active les sous-commandes avancées (ws-book-ladder, ws-live) si True.
+    """
+    if extras is None:
+        extras = os.environ.get("CRYPTO_MM_EXTRAS", "0").lower() in {"1", "true", "yes", "on"}
 
-    Paramètres
-    ----------
-    extras : bool, optional
-        Si True, expose aussi `ws-book-ladder` et `ws-live`.
-        Par défaut False pour garantir un set stable pour les tests.
-    """
     parser = argparse.ArgumentParser(
         prog="crypto_mm",
         description="Crypto MM scaffold (Kraken WS v2) with 500ms heartbeat and CLI demos.",
@@ -71,6 +71,7 @@ def build_parser(*, extras: Optional[bool] = False) -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    # --- Démos basiques ---
     p_live = sub.add_parser("live", help="Run live loop (demo; no external API).")
     p_live.add_argument("--duration", type=float, default=5.0, help="Duration in seconds (demo).")
 
@@ -83,7 +84,6 @@ def build_parser(*, extras: Optional[bool] = False) -> argparse.ArgumentParser:
 
     # --- Self-checks & WS ---
     sub.add_parser("check", help="Run quick checks (imports, clock, offline mapping).")
-
     sub.add_parser("ws-ping", help="Send a ping event to Kraken v2 and await first message.")
 
     p_tr = sub.add_parser("ws-trades", help="Stream Kraken trades (TTY refresh 500ms).")
@@ -95,32 +95,45 @@ def build_parser(*, extras: Optional[bool] = False) -> argparse.ArgumentParser:
     p_ob.add_argument("--depth", type=int, default=10, help="Depth (10/25/100/500/1000).")
     p_ob.add_argument("--duration", type=float, default=5.0, help="Duration in seconds.")
 
-    # --- Extras optionnels (pour ne pas casser les tests qui vérifient l'égalité exacte) ---
+    # --- Extras optionnels ---
     if extras:
+        # L2 stateful simple (log)
         p_ladder = sub.add_parser("ws-book-ladder", help="Stateful L2: mid/microprice + ladder filtered.")
-        p_ladder.add_argument("--pair", type=str, default="BTC/USD", help="Kraken pair (e.g., BTC/USD).")
-        p_ladder.add_argument("--depth", type=int, default=10, help="Depth subscription (10/25/100/500/1000).")
-        p_ladder.add_argument("--min-size", type=float, default=0.0, help="Filter out levels with qty < min_size.")
-        p_ladder.add_argument("--duration", type=float, default=10.0, help="Duration in seconds.")
+        p_ladder.add_argument("--pair", type=str, default="BTC/USD")
+        p_ladder.add_argument("--depth", type=int, default=10)
+        p_ladder.add_argument("--min-size", type=float, default=0.0)
+        p_ladder.add_argument("--duration", type=float, default=10.0)
 
+        # Vue TTY complète
         p_livews = sub.add_parser("ws-live", help="Live TTY view: book (stateful) + trades (tape).")
         p_livews.add_argument("--pair", type=str, default="BTC/USD")
         p_livews.add_argument("--depth", type=int, default=10)
         p_livews.add_argument("--min-size", type=float, default=0.0)
         p_livews.add_argument("--duration", type=float, default=20.0)
-        p_livews.add_argument("--events", dest="events", action="store_true",
-                              help="Show right panel as EVENTS instead of LAST TRADES.")
-        p_livews.add_argument("--no-events", dest="events", action="store_false")
-        p_livews.set_defaults(events=False)
-        p_livews.add_argument("--color", dest="color", action="store_true")
-        p_livews.add_argument("--no-color", dest="color", action="store_false")
-        p_livews.add_argument("--ladder-mode", choices=["summary", "levels", "off"],
-                              default="summary", help="Ladder display mode.")
-        p_livews.add_argument("--ladder-levels", type=int, default=6,
-                              help="Max levels per side when ladder-mode=levels.")
-        p_livews.set_defaults(color=True)
-    return parser
 
+        # Panneau droit = events ?
+        p_livews.add_argument("--events", action="store_true",
+                              help="Right panel shows events instead of last trades.")
+        # Fair prices affichés AU-DESSUS du tableau des events (liste CSV)
+        p_livews.add_argument("--events-fp", type=str, default="",
+                              help="Comma-separated fair prices to display in Events panel (mid,micro,ewma).")
+        # Fair price principal (affiché à gauche)
+        p_livews.add_argument("--fp-mode", choices=["mid", "microprice", "ewma"], default="microprice",
+                              help="Fair price mode on the left panel.")
+        p_livews.add_argument("--fp-alpha", type=float, default=0.5,
+                              help="alpha for microprice (0..1).")
+        p_livews.add_argument("--fp-lambda", type=float, default=1.0,
+                              help="forgetting factor /s for EWMA mid.")
+
+        # Ladder (affichage gauche, sous KPIs)
+        p_livews.add_argument("--ladder-mode", choices=["summary", "levels", "off"], default="summary")
+        p_livews.add_argument("--ladder-levels", type=int, default=6)
+
+        # Couleurs
+        p_livews.add_argument("--no-color", dest="color", action="store_false")
+        p_livews.set_defaults(color=True)
+
+    return parser
 
 def _apply_config_path_arg(cfg_path: Optional[str]) -> None:
     if cfg_path:
@@ -407,18 +420,24 @@ async def _ws_live_async(
     Vue TTY complète (book stateful + trade tape) rafraîchie toutes heartbeat_ms (~500 ms).
     Left panel: OrderBook; Right panel: Events OR Last trades.
     """
-    logger = get_logger("ws-live", settings.log_level)
-
-    # Taisons les logs verbeux dans la console UI
     import logging
+    from crypto_mm.mm.fair_price import FairPrice
+    from crypto_mm.ui.live_view import (
+        LiveState,
+        RenderOptions,
+        render,
+        stop_render,
+        log_event,
+    )
+    # logger principal UI (réduit la verbosité pour ne pas polluer l'écran)
+    logger = get_logger("ws-live", settings.log_level)
     logger.setLevel(logging.ERROR)
     logger.propagate = False
     for h in list(logger.handlers):
         if getattr(h, "stream", None) is sys.stdout:
             h.stream = sys.stderr
 
-    client = KrakenWSV2Client(settings=settings, logger=logger)
-
+    # Sous-loggers
     ob_logger = get_logger("ws-live.ob", settings.log_level)
     tape_logger = get_logger("ws-live.tape", settings.log_level)
     for lg in (ob_logger, tape_logger):
@@ -428,58 +447,105 @@ async def _ws_live_async(
             if getattr(h, "stream", None) is sys.stdout:
                 h.stream = sys.stderr
 
+    # Client WS + état
+    client = KrakenWSV2Client(settings=settings, logger=logger)
     ob = OrderBookL2(logger=ob_logger)
-    from crypto_mm.data.trade_tape import TradeTape  # local import
+    from crypto_mm.data.trade_tape import TradeTape  # import local
     tape = TradeTape(capacity=2000, logger=tape_logger)
-    state = LiveState(pair=pair, order_book=ob, trade_tape=tape, depth=depth, min_size=min_size)
 
-    log_event("ws.connected")
+    # --- Fair price (panneau gauche) : via ENV ou défauts ---
+    fp_mode_env = os.environ.get("CRYPTO_MM_FP_MODE", "microprice").lower()
+    try:
+        fp_alpha_env = float(os.environ.get("CRYPTO_MM_FP_ALPHA", "0.5"))
+    except ValueError:
+        fp_alpha_env = 0.5
+    try:
+        fp_lambda_env = float(os.environ.get("CRYPTO_MM_FP_LAMBDA", "1.0"))
+    except ValueError:
+        fp_lambda_env = 1.0
 
-    async def book_task():
+    if fp_mode_env == "mid":
+        fair = FairPrice(mode="mid")
+    elif fp_mode_env in ("micro", "microprice"):
+        fair = FairPrice(mode="microprice", alpha=fp_alpha_env)
+    else:
+        fair = FairPrice(mode="ewma_mid", lambda_=fp_lambda_env)
+
+    # --- Fair prices affichés en tête du panneau Events (liste CSV dans ENV) ---
+    # Ex: CRYPTO_MM_EVENTS_FP="mid,micro,ewma"
+    events_fp_env = tuple(
+        s.strip().lower()
+        for s in os.environ.get("CRYPTO_MM_EVENTS_FP", "").split(",")
+        if s.strip()
+    )
+
+    state = LiveState(
+        pair=pair,
+        order_book=ob,
+        trade_tape=tape,
+        depth=depth,
+        min_size=min_size,
+        fair=fair,
+    )
+
+    # Options de rendu UI
+    opts = RenderOptions(
+        show_events=show_events,
+        color=color,
+        ladder_mode=ladder_mode,
+        ladder_levels=ladder_levels,
+        events_fp_modes=events_fp_env,
+        fp_alpha=fp_alpha_env,
+        fp_lambda=fp_lambda_env,
+    )
+
+    # Une trace discrète dans le panneau Events
+    log_event("snapshot starting ws-live")
+
+    # --- Tâches WS ---
+    async def book_task() -> None:
         while True:
             try:
                 async for msg in client.subscribe_order_book(pair, depth=depth):
                     if msg.type == "snapshot":
                         ob.apply_snapshot(msg)
-                        log_event(f"snapshot seq={msg.seq}")
+                        if show_events:
+                            log_event("snapshot applied")
                     else:
                         ob.apply_delta(msg)
-                # boucle terminée (déco) -> resouscrire
-            except ResyncRequired as e:
-                log_event(f"RESYNC required: {e}")
+            except ResyncRequired:
+                # signale à l'UI + reset état
+                if show_events:
+                    log_event("resync required")
                 ob.clear()
                 continue
 
-    async def trades_task():
+    async def trades_task() -> None:
         async for tr in client.subscribe_trades(pair):
             tape.push(tr)
-            if show_events:
-                # le panneau events ajoute déjà 'trade' via renderer; ici on peut filtrer/spécifier
-                pass
+            # NB: le renderer ajoute lui-même le dernier trade aux events,
+            # pas besoin d'appeler log_event ici pour chaque trade.
 
-    t1 = asyncio.create_task(book_task())
-    t2 = asyncio.create_task(trades_task())
+    t_book = asyncio.create_task(book_task())
+    t_trades = asyncio.create_task(trades_task())
 
     start = time.perf_counter()
     try:
         while (time.perf_counter() - start) < duration:
             await asyncio.sleep(settings.heartbeat_ms / 1000.0)
-            opts = RenderOptions(
-                show_events=show_events,
-                color=color,
-                ladder_mode=ladder_mode,
-                ladder_levels=ladder_levels,
-            )
-            render(state, out=sys.stdout, opts=opts)
+            render(state, opts=opts)  # mise à jour in-place sans redessiner tout l'écran
     except KeyboardInterrupt:
-        log_event("KeyboardInterrupt")
+        # sortie propre sur Ctrl-C
+        pass
     finally:
-        for t in (t1, t2):
+        # stop UI (rétablit le curseur)
+        stop_render()
+        # annule tâches
+        for t in (t_book, t_trades):
             t.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await t
-        with contextlib.suppress(Exception):
-            stop_render()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.gather(t_book, t_trades)
+
     return 0
 
 # ---------- Entrées CLI ----------
