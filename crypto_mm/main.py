@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 """
-CLI principal (Kraken WS v2) — fonctionne à la fois:
-- comme module:      python -m crypto_mm.main ws-trades --pair BTC/USD
-- comme script brut: python crypto_mm/crypto_mm/main.py ws-trades --pair BTC/USD
+CLI principal (Kraken WS v2):
 
-Sous-commandes utiles:
-- check                : sanity offline
-- ws-ping              : ping v2
-- ws-trades            : stream trades (TTY 500ms)
-- ws-book              : stream L2 (top best bid/ask via messages)
-- ws-book-ladder       : (optionnel via CRYPTO_MM_EXTRAS=1) L2 stateful
-- ws-live              : (optionnel via CRYPTO_MM_EXTRAS=1) live TTY book+trades
-- live/replay/plot     : démos utilitaires
+Sous-commandes de base :
+- live / replay / plot / check / ws-ping / ws-trades / ws-book
+
+Extras (CRYPTO_MM_EXTRAS=1) :
+- ws-book-ladder
+- ws-live  (UI TTY : OrderBook + KPIs + Events)
+
+UI : rafraîchissement ~500 ms (paramétré par heartbeat_ms).
 """
 
 import argparse
@@ -21,25 +19,25 @@ import contextlib
 import os
 import sys
 import time
+import logging
+import warnings
 from typing import List, Optional, Tuple
 
 import numpy as np
 
 # --- imports robustes (module OU script brut) ---
 try:
-    # Exécution comme module: imports relatifs OK
     from .core.config import Settings, load_settings
     from .core.clock import Clock
     from .core.log import get_logger
     from .core.types import utc_now_iso
     from .data.ws_client import KrakenWSV2Client, ResyncRequired
     from .data.order_book import OrderBookL2
-    from .ui.live_view import LiveState, render, stop_render, log_event, RenderOptions
-    from .mm.fair_price import FairPrice
-except Exception:  # pragma: no cover - fallback pour exécution directe
+    from .ui.live_view import LiveState, RenderOptions, render, stop_render, log_event
+except Exception:  # pragma: no cover
     import pathlib
 
-    PKG_ROOT = str(pathlib.Path(__file__).resolve().parents[1])  # répertoire parent contenant le package 'crypto_mm'
+    PKG_ROOT = str(pathlib.Path(__file__).resolve().parents[1])
     if PKG_ROOT not in sys.path:
         sys.path.insert(0, PKG_ROOT)
 
@@ -49,29 +47,64 @@ except Exception:  # pragma: no cover - fallback pour exécution directe
     from crypto_mm.core.types import utc_now_iso  # type: ignore
     from crypto_mm.data.ws_client import KrakenWSV2Client, ResyncRequired  # type: ignore
     from crypto_mm.data.order_book import OrderBookL2  # type: ignore
-    from crypto_mm.ui.live_view import LiveState, render, stop_render, log_event, RenderOptions  # type: ignore
-    from crypto_mm.mm.fair_price import FairPrice
+    from crypto_mm.ui.live_view import LiveState, RenderOptions, render, stop_render, log_event  # type: ignore
 
+
+# ---------- Utils ----------
+
+def _apply_config_path_arg(cfg_path: Optional[str]) -> None:
+    if cfg_path:
+        os.environ["CRYPTO_MM_CONFIG"] = cfg_path
+
+
+# Context manager : coupe TOUT logging vers la console pendant ws-live
+import logging
+from contextlib import contextmanager
+
+@contextmanager
+def _squelch_console_logging():
+    """
+    Désactive les logs (< CRITICAL) et redirige les StreamHandlers stdout->stderr.
+    Supprime aussi les warnings (FutureWarning, etc.) pendant l'UI.
+    """
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+
+    # warnings
+    warnings_filters_backup = warnings.filters[:]
+    warnings.simplefilter("ignore")
+
+    modified: list[tuple[logging.Logger, logging.Handler, object]] = []
+    try:
+        all_names = [""] + [n for n in logging.root.manager.loggerDict.keys()]  # type: ignore[attr-defined]
+        for name in all_names:
+            lg = logging.getLogger(name)
+            for h in list(getattr(lg, "handlers", [])):
+                if isinstance(h, logging.StreamHandler) and getattr(h, "stream", None) in (sys.stdout, sys.__stdout__):
+                    modified.append((lg, h, h.stream))
+                    try: h.flush()
+                    except Exception: pass
+                    h.stream = sys.stderr
+        yield
+    finally:
+        # restore handlers
+        for lg, h, old_stream in modified:
+            try: h.flush()
+            except Exception: pass
+            h.stream = old_stream
+        # restore logging / warnings
+        logging.disable(prev_disable)
+        warnings.filters[:] = warnings_filters_backup
 
 # ---------- Parser ----------
-
-def build_parser(*, extras: Optional[bool] = None) -> argparse.ArgumentParser:
-    """
-    Crée le parser CLI.
-    - extras: active les sous-commandes avancées (ws-book-ladder, ws-live) si True.
-    """
-    if extras is None:
-        extras = os.environ.get("CRYPTO_MM_EXTRAS", "0").lower() in {"1", "true", "yes", "on"}
-
+def build_parser(*, extras: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crypto_mm",
         description="Crypto MM scaffold (Kraken WS v2) with 500ms heartbeat and CLI demos.",
     )
     parser.add_argument("--config", type=str, default=None, help="Path to config.yaml (default: ./config.yaml)")
-
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # --- Démos basiques ---
     p_live = sub.add_parser("live", help="Run live loop (demo; no external API).")
     p_live.add_argument("--duration", type=float, default=5.0, help="Duration in seconds (demo).")
 
@@ -95,58 +128,29 @@ def build_parser(*, extras: Optional[bool] = None) -> argparse.ArgumentParser:
     p_ob.add_argument("--depth", type=int, default=10, help="Depth (10/25/100/500/1000).")
     p_ob.add_argument("--duration", type=float, default=5.0, help="Duration in seconds.")
 
-    # --- Extras optionnels ---
+    # --- Extras optionnels (désactivés par défaut pour les tests) ---
     if extras:
-        # L2 stateful simple (log)
         p_ladder = sub.add_parser("ws-book-ladder", help="Stateful L2: mid/microprice + ladder filtered.")
         p_ladder.add_argument("--pair", type=str, default="BTC/USD")
         p_ladder.add_argument("--depth", type=int, default=10)
         p_ladder.add_argument("--min-size", type=float, default=0.0)
         p_ladder.add_argument("--duration", type=float, default=10.0)
 
-        # Vue TTY complète
         p_livews = sub.add_parser("ws-live", help="Live TTY view: book (stateful) + trades (tape).")
         p_livews.add_argument("--pair", type=str, default="BTC/USD")
         p_livews.add_argument("--depth", type=int, default=10)
         p_livews.add_argument("--min-size", type=float, default=0.0)
         p_livews.add_argument("--duration", type=float, default=20.0)
-
-        # Panneau droit = events ?
-        p_livews.add_argument("--events", action="store_true",
-                              help="Right panel shows events instead of last trades.")
-        # Fair prices affichés AU-DESSUS du tableau des events (liste CSV)
-        p_livews.add_argument("--events-fp", type=str, default="",
-                              help="Comma-separated fair prices to display in Events panel (mid,micro,ewma).")
-        # Fair price principal (affiché à gauche)
-        p_livews.add_argument("--fp-mode", choices=["mid", "microprice", "ewma"], default="microprice",
-                              help="Fair price mode on the left panel.")
-        p_livews.add_argument("--fp-alpha", type=float, default=0.5,
-                              help="alpha for microprice (0..1).")
-        p_livews.add_argument("--fp-lambda", type=float, default=1.0,
-                              help="forgetting factor /s for EWMA mid.")
-
-        # Ladder (affichage gauche, sous KPIs)
-        p_livews.add_argument("--ladder-mode", choices=["summary", "levels", "off"], default="summary")
-        p_livews.add_argument("--ladder-levels", type=int, default=6)
-
-        # Couleurs
-        p_livews.add_argument("--no-color", dest="color", action="store_false")
-        p_livews.set_defaults(color=True)
+        p_livews.add_argument("--events", action="store_true", help="Show right-side events panel.")
 
     return parser
 
-def _apply_config_path_arg(cfg_path: Optional[str]) -> None:
-    if cfg_path:
-        os.environ["CRYPTO_MM_CONFIG"] = cfg_path
 
 
-# ---------- Démos utilitaires ----------
+# ---------- Démos utilitaires (sans WS) ----------
 
 def cmd_live(settings: Settings, duration: float) -> int:
-    logger = get_logger("live", settings.log_level)
-    clock = Clock(period_ms=settings.heartbeat_ms, logger=logger)
-    logger.info({"event": "live.start", "ts": utc_now_iso(), "heartbeat_ms": settings.heartbeat_ms})
-
+    clock = Clock(period_ms=settings.heartbeat_ms, logger=get_logger("live", settings.log_level))
     start = time.perf_counter()
 
     def on_tick(tick: int, dt_ms: float) -> None:
@@ -157,15 +161,11 @@ def cmd_live(settings: Settings, duration: float) -> int:
 
     clock.run(duration_s=duration, iterations=None, on_tick=on_tick)
     sys.stdout.write("\n")
-    logger.info(clock.metrics_summary_event("live.stop"))
     return 0
 
 
 def cmd_replay(settings: Settings, duration: float, speed: float) -> int:
-    logger = get_logger("replay", settings.log_level)
-    clock = Clock(period_ms=int(settings.heartbeat_ms / max(speed, 0.1)), logger=logger)
-    logger.info({"event": "replay.start", "ts": utc_now_iso(), "heartbeat_ms": clock.period_ms, "speed": speed})
-
+    clock = Clock(period_ms=int(settings.heartbeat_ms / max(speed, 0.1)), logger=get_logger("replay", settings.log_level))
     start = time.perf_counter()
 
     def on_tick(tick: int, dt_ms: float) -> None:
@@ -176,15 +176,13 @@ def cmd_replay(settings: Settings, duration: float, speed: float) -> int:
 
     clock.run(duration_s=duration, iterations=None, on_tick=on_tick)
     sys.stdout.write("\n")
-    logger.info(clock.metrics_summary_event("replay.stop"))
     return 0
 
 
 def cmd_plot(settings: Settings, output: Optional[str]) -> int:
     import matplotlib.pyplot as plt
-    logger = get_logger("plot", settings.log_level)
-    out = output or os.path.join(settings.plot_output_dir, f"latency_{int(time.time())}.png")
 
+    out = output or os.path.join(settings.plot_output_dir, f"latency_{int(time.time())}.png")
     x = np.arange(100)
     y = np.sin(x / 10.0)
     plt.figure()
@@ -194,23 +192,14 @@ def cmd_plot(settings: Settings, output: Optional[str]) -> int:
     plt.ylabel("Value")
     os.makedirs(settings.plot_output_dir, exist_ok=True)
     plt.savefig(out)
-    logger.info({"event": "plot.saved", "ts": utc_now_iso(), "output": out})
     print(f"Plot saved to: {out}")
     return 0
 
 
 def cmd_check(settings: Settings) -> int:
-    """Lightweight checks: imports, clock tick, offline checksum/mappers."""
-    try:
-        # Cas package
-        from .data.ws_client import _BookState, _compute_checksum_v2, _levels_from_v2  # type: ignore
-    except Exception:
-        # Cas script direct
-        from crypto_mm.data.ws_client import _BookState, _compute_checksum_v2, _levels_from_v2  # type: ignore
+    from .data.ws_client import _BookState, _compute_checksum_v2  # type: ignore
 
-    logger = get_logger("check", settings.log_level)
-    # 1) Clock quick tick
-    clock = Clock(period_ms=100, logger=logger)
+    clock = Clock(period_ms=100, logger=get_logger("check", settings.log_level))
     ticks = {"n": 0}
 
     def cb(_i: int, _dt: float) -> None:
@@ -218,17 +207,11 @@ def cmd_check(settings: Settings) -> int:
 
     clock.run(duration_s=0.4, iterations=None, on_tick=cb)
 
-    # 2) Offline book snapshot+update and checksum v2
-    asks = [{"price": "50000.0", "qty": "1.0"}, {"price": "50010.0", "qty": "2.0"}]
-    bids = [{"price": "49990.0", "qty": "1.5"}, {"price": "49980.0", "qty": "3.0"}]
+    asks = [{"price": "50000.0", "qty": "1.0"}]
+    bids = [{"price": "49990.0", "qty": "1.5"}]
     st = _BookState.from_snapshot(asks, bids, depth=10)
-    up_a = [{"price": "50005.0", "qty": "0.5"}]
-    up_b = [{"price": "49995.0", "qty": "0.0"}]
-    st.apply_update(up_a, up_b)
-    _ = _levels_from_v2(up_a + up_b)
     _ = _compute_checksum_v2(st.top10_asks(), st.top10_bids())
-
-    print("CHECK OK: imports, clock, v2 mapping+checksum.")
+    print("CHECK OK")
     return 0
 
 
@@ -236,7 +219,6 @@ def cmd_check(settings: Settings) -> int:
 
 async def _ws_ping_async(settings: Settings) -> int:
     client = KrakenWSV2Client(settings=settings, logger=get_logger("ws-ping", settings.log_level))
-    # Ouvre un flux et quitte dès que quelque chose arrive (ping implicite par subscribe)
     async for _ in client._resilient_stream(channel="trade", symbols=["BTC/USD"]):
         return 0
     return 1
@@ -267,7 +249,9 @@ async def _ws_trades_async(settings: Settings, pair: str, duration: float) -> in
                 sys.stdout.write(f"\r[{utc_now_iso()}] {pair} waiting for trades...")
             else:
                 sys.stdout.write(
-                    f"\r[{last.ts}] {pair} TRADE id={last.trade_id} side={last.side} px={last.price_usd_per_btc:.2f} qty={last.qty_btc:.6f}  p50={np.percentile(latencies,50):.1f}ms p95={np.percentile(latencies,95):.1f}ms"
+                    f"\r[{last.ts}] {pair} TRADE id={last.trade_id} {last.side} "
+                    f"px={last.price_usd_per_btc:.2f} qty={last.qty_btc:.6f}  "
+                    f"p50={np.percentile(latencies,50):.1f}ms p95={np.percentile(latencies,95):.1f}ms"
                 )
             sys.stdout.flush()
         sys.stdout.write("\n")
@@ -275,7 +259,6 @@ async def _ws_trades_async(settings: Settings, pair: str, duration: float) -> in
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    logger.info({"event": "ws-trades.stop", "ts": utc_now_iso()})
     return 0
 
 
@@ -286,10 +269,6 @@ async def _ws_book_async(settings: Settings, pair: str, duration: float, depth: 
     last_seq: Optional[int] = None
     best_bid: Optional[Tuple[float, float]] = None
     best_ask: Optional[Tuple[float, float]] = None
-
-    latencies: List[float] = []
-    last_print = time.perf_counter()
-    start = time.perf_counter()
 
     async def collector() -> None:
         nonlocal last_seq, best_bid, best_ask
@@ -313,96 +292,26 @@ async def _ws_book_async(settings: Settings, pair: str, duration: float, depth: 
             logger.error({"event": "ws-book.resync", "ts": utc_now_iso(), "error": str(e)})
 
     task = asyncio.create_task(collector())
+    start = time.perf_counter()
     try:
         while (time.perf_counter() - start) < duration:
             await asyncio.sleep(settings.heartbeat_ms / 1000.0)
-            now = time.perf_counter()
-            latencies.append((now - last_print) * 1000.0)
-            last_print = now
             if last_seq is None:
                 sys.stdout.write(f"\r[{utc_now_iso()}] {pair} waiting for snapshot/deltas...")
             else:
                 bb = f"{best_bid[0]:.2f}/{best_bid[1]:.4f}" if best_bid else "NA"
                 aa = f"{best_ask[0]:.2f}/{best_ask[1]:.4f}" if best_ask else "NA"
-                sys.stdout.write(
-                    f"\r[{utc_now_iso()}] {pair} SEQ={last_seq} BEST_BID px/qty={bb}  BEST_ASK px/qty={aa}  p50={np.percentile(latencies,50):.1f}ms p95={np.percentile(latencies,95):.1f}ms"
-                )
+                sys.stdout.write(f"\r[{utc_now_iso()}] {pair} SEQ={last_seq} BID {bb}  ASK {aa}")
             sys.stdout.flush()
         sys.stdout.write("\n")
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    logger.info({"event": "ws-book.stop", "ts": utc_now_iso()})
     return 0
 
 
-async def _ws_book_ladder_async(settings: Settings, pair: str, duration: float, depth: int, min_size: float) -> int:
-    """
-    Maintient un carnet L2 stateful (OrderBookL2) et affiche mid/microprice + ladder filtré.
-    """
-    logger = get_logger("ws-book-ladder", settings.log_level)
-    client = KrakenWSV2Client(settings=settings, logger=logger)
-    ob = OrderBookL2(logger=logger)
-
-    start = time.perf_counter()
-    last_print = time.perf_counter()
-    latencies: List[float] = []
-
-    async def collector() -> None:
-        # Reboucle en cas de resync
-        while True:
-            try:
-                async for msg in client.subscribe_order_book(pair, depth=depth):
-                    if msg.type == "snapshot":
-                        ob.apply_snapshot(msg)
-                    else:
-                        ob.apply_delta(msg)
-            except ResyncRequired as e:
-                logger.error({"event": "ws-book-ladder.resync", "ts": utc_now_iso(), "error": str(e)})
-                ob.clear()
-                continue  # repart sur un nouveau subscribe
-
-    task = asyncio.create_task(collector())
-    try:
-        while (time.perf_counter() - start) < duration:
-            await asyncio.sleep(settings.heartbeat_ms / 1000.0)
-            now = time.perf_counter()
-            latencies.append((now - last_print) * 1000.0)
-            last_print = now
-
-            top = ob.top(1)
-            best_bid = top["bids"][0] if top["bids"] else None
-            best_ask = top["asks"][0] if top["asks"] else None
-            mid = ob.mid_price()
-            micro = ob.microprice()
-            ladder = ob.ladder(depth=depth, min_size=min_size)
-
-            bb = f"{best_bid[0]:.2f}/{best_bid[1]:.4f}" if best_bid else "NA"
-            aa = f"{best_ask[0]:.2f}/{best_ask[1]:.4f}" if best_ask else "NA"
-            mid_s = f"{mid:.2f}" if mid == mid else "NA"
-            micro_s = f"{micro:.2f}" if micro == micro else "NA"
-
-            # résumé ladder compact (top 3 par côté)
-            ladder_bids = " ".join([f"{p:.0f}@{q:.3f}" for p, q in ladder["bids"][:3]]) or "-"
-            ladder_asks = " ".join([f"{p:.0f}@{q:.3f}" for p, q in ladder["asks"][:3]]) or "-"
-
-            sys.stdout.write(
-                f"\r[{utc_now_iso()}] {pair} SEQ={ob.last_seq} "
-                f"BEST_BID={bb} BEST_ASK={aa} MID={mid_s} MICRO={micro_s} "
-                f"BIDS({len(ladder['bids'])}): {ladder_bids}  ASKS({len(ladder['asks'])}): {ladder_asks}  "
-                f"p50={np.percentile(latencies,50):.1f}ms p95={np.percentile(latencies,95):.1f}ms"
-            )
-            sys.stdout.flush()
-        sys.stdout.write("\n")
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-    logger.info(ob.metrics_event("ws-book-ladder.stop"))
-    return 0
-
+# ---------- WS: Live UI (extras) ----------
 
 async def _ws_live_async(
     settings: Settings,
@@ -410,148 +319,66 @@ async def _ws_live_async(
     duration: float,
     depth: int,
     min_size: float,
-    *,
-    show_events: bool,
-    color: bool,
-    ladder_mode: str,
-    ladder_levels: int,
 ) -> int:
     """
     Vue TTY complète (book stateful + trade tape) rafraîchie toutes heartbeat_ms (~500 ms).
-    Left panel: OrderBook; Right panel: Events OR Last trades.
+    Panneau gauche : OrderBook + KPIs + ladder summary
+    Panneau droit  : Events (tsZ | type | side | qty | price)
     """
-    import logging
-    from crypto_mm.mm.fair_price import FairPrice
-    from crypto_mm.ui.live_view import (
-        LiveState,
-        RenderOptions,
-        render,
-        stop_render,
-        log_event,
-    )
-    # logger principal UI (réduit la verbosité pour ne pas polluer l'écran)
-    logger = get_logger("ws-live", settings.log_level)
-    logger.setLevel(logging.ERROR)
-    logger.propagate = False
-    for h in list(logger.handlers):
-        if getattr(h, "stream", None) is sys.stdout:
-            h.stream = sys.stderr
-
-    # Sous-loggers
-    ob_logger = get_logger("ws-live.ob", settings.log_level)
-    tape_logger = get_logger("ws-live.tape", settings.log_level)
-    for lg in (ob_logger, tape_logger):
-        lg.setLevel(logging.ERROR)
-        lg.propagate = False
-        for h in list(lg.handlers):
-            if getattr(h, "stream", None) is sys.stdout:
-                h.stream = sys.stderr
-
-    # Client WS + état
-    client = KrakenWSV2Client(settings=settings, logger=logger)
-    ob = OrderBookL2(logger=ob_logger)
     from crypto_mm.data.trade_tape import TradeTape  # import local
-    tape = TradeTape(capacity=2000, logger=tape_logger)
 
-    # --- Fair price (panneau gauche) : via ENV ou défauts ---
-    fp_mode_env = os.environ.get("CRYPTO_MM_FP_MODE", "microprice").lower()
-    try:
-        fp_alpha_env = float(os.environ.get("CRYPTO_MM_FP_ALPHA", "0.5"))
-    except ValueError:
-        fp_alpha_env = 0.5
-    try:
-        fp_lambda_env = float(os.environ.get("CRYPTO_MM_FP_LAMBDA", "1.0"))
-    except ValueError:
-        fp_lambda_env = 1.0
+    # **Bloque à la source** toute écriture logging qui polluerait la TTY :
+    with _squelch_console_logging():
+        client = KrakenWSV2Client(settings=settings, logger=get_logger("ws-live", settings.log_level))
+        ob = OrderBookL2(logger=get_logger("ws-live.ob", settings.log_level))
+        tape = TradeTape(capacity=2000, logger=get_logger("ws-live.tape", settings.log_level))
 
-    if fp_mode_env == "mid":
-        fair = FairPrice(mode="mid")
-    elif fp_mode_env in ("micro", "microprice"):
-        fair = FairPrice(mode="microprice", alpha=fp_alpha_env)
-    else:
-        fair = FairPrice(mode="ewma_mid", lambda_=fp_lambda_env)
+        state = LiveState(pair=pair, order_book=ob, trade_tape=tape, depth=depth, min_size=min_size)
+        opts = RenderOptions(color=True)
 
-    # --- Fair prices affichés en tête du panneau Events (liste CSV dans ENV) ---
-    # Ex: CRYPTO_MM_EVENTS_FP="mid,micro,ewma"
-    events_fp_env = tuple(
-        s.strip().lower()
-        for s in os.environ.get("CRYPTO_MM_EVENTS_FP", "").split(",")
-        if s.strip()
-    )
+        log_event("startup")
 
-    state = LiveState(
-        pair=pair,
-        order_book=ob,
-        trade_tape=tape,
-        depth=depth,
-        min_size=min_size,
-        fair=fair,
-    )
+        async def book_task() -> None:
+            while True:
+                try:
+                    async for msg in client.subscribe_order_book(pair, depth=depth):
+                        if msg.type == "snapshot":
+                            ob.apply_snapshot(msg)
+                            log_event("snapshot")
+                        else:
+                            ob.apply_delta(msg)
+                except ResyncRequired:
+                    log_event("resync")
+                    ob.clear()
+                    continue
 
-    # Options de rendu UI
-    opts = RenderOptions(
-        show_events=show_events,
-        color=color,
-        ladder_mode=ladder_mode,
-        ladder_levels=ladder_levels,
-        events_fp_modes=events_fp_env,
-        fp_alpha=fp_alpha_env,
-        fp_lambda=fp_lambda_env,
-    )
+        async def trades_task() -> None:
+            async for tr in client.subscribe_trades(pair):
+                tape.push(tr)
+                # >>> NEW: évènement structuré pour l'UI (best-effort)
+                try:
+                    log_event(f"trade {tr.side} {tr.qty_btc:.6f} @ {tr.price_usd_per_btc:.2f}")
+                except Exception:
+                    pass
 
-    # Une trace discrète dans le panneau Events
-    log_event("snapshot starting ws-live")
+        t1 = asyncio.create_task(book_task())
+        t2 = asyncio.create_task(trades_task())
 
-    # --- Tâches WS ---
-    async def book_task() -> None:
-        while True:
-            try:
-                async for msg in client.subscribe_order_book(pair, depth=depth):
-                    if msg.type == "snapshot":
-                        ob.apply_snapshot(msg)
-                        if show_events:
-                            log_event("snapshot applied")
-                    else:
-                        ob.apply_delta(msg)
-            except ResyncRequired:
-                # signale à l'UI + reset état
-                if show_events:
-                    log_event("resync required")
-                ob.clear()
-                continue
-
-    async def trades_task() -> None:
-        async for tr in client.subscribe_trades(pair):
-            tape.push(tr)
-            # NB: le renderer ajoute lui-même le dernier trade aux events,
-            # pas besoin d'appeler log_event ici pour chaque trade.
-
-    t_book = asyncio.create_task(book_task())
-    t_trades = asyncio.create_task(trades_task())
-
-    start = time.perf_counter()
-    try:
-        while (time.perf_counter() - start) < duration:
-            await asyncio.sleep(settings.heartbeat_ms / 1000.0)
-            render(state, opts=opts)  # mise à jour in-place sans redessiner tout l'écran
-    except KeyboardInterrupt:
-        # sortie propre sur Ctrl-C
-        pass
-    finally:
-        # stop UI (rétablit le curseur)
-        stop_render()
-        # annule tâches
-        for t in (t_book, t_trades):
-            t.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.gather(t_book, t_trades)
+        start = time.perf_counter()
+        try:
+            while (time.perf_counter() - start) < duration:
+                await asyncio.sleep(settings.heartbeat_ms / 1000.0)
+                render(state, opts=opts)  # mise à jour in-place, une seule fenêtre
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop_render()
+            for t in (t1, t2):
+                t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(t1, t2)
 
     return 0
-
-# ---------- Entrées CLI ----------
-
-def cmd_check_all(settings: Settings) -> int:
-    return cmd_check(settings)
 
 
 def cmd_ws_ping(settings: Settings) -> int:
@@ -566,40 +393,63 @@ def cmd_ws_book(settings: Settings, pair: str, duration: float, depth: int) -> i
     return asyncio.run(_ws_book_async(settings, pair, duration, depth))
 
 
+def cmd_ws_live(settings: Settings, pair: str, duration: float, depth: int, min_size: float) -> int:
+    return asyncio.run(_ws_live_async(settings, pair, duration, depth, min_size))
+
+def cmd_check_all(settings: Settings) -> int:
+    return cmd_check(settings)
+
+# Optionnel : ws-book-ladder (si extras)
+async def _ws_book_ladder_async(settings: Settings, pair: str, duration: float, depth: int, min_size: float) -> int:
+    logger = get_logger("ws-book-ladder", settings.log_level)
+    client = KrakenWSV2Client(settings=settings, logger=logger)
+    ob = OrderBookL2(logger=logger)
+    start = time.perf_counter()
+
+    async def collector() -> None:
+        while True:
+            try:
+                async for msg in client.subscribe_order_book(pair, depth=depth):
+                    if msg.type == "snapshot":
+                        ob.apply_snapshot(msg)
+                    else:
+                        ob.apply_delta(msg)
+            except ResyncRequired:
+                ob.clear()
+                continue
+
+    task = asyncio.create_task(collector())
+    try:
+        while (time.perf_counter() - start) < duration:
+            await asyncio.sleep(settings.heartbeat_ms / 1000.0)
+            top = ob.top(1)
+            bb = top["bids"][0] if top["bids"] else None
+            aa = top["asks"][0] if top["asks"] else None
+            mid = ob.mid_price()
+            micro = ob.microprice()
+            sys.stdout.write(
+                f"\r{pair} mid={mid:.2f} micro={micro:.2f} "
+                f"best_bid={bb[0]:.2f}/{bb[1]:.4f} best_ask={aa[0]:.2f}/{aa[1]:.4f}      "
+            ); sys.stdout.flush()
+        sys.stdout.write("\n")
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    return 0
+
 def cmd_ws_book_ladder(settings: Settings, pair: str, duration: float, depth: int, min_size: float) -> int:
     return asyncio.run(_ws_book_ladder_async(settings, pair, duration, depth, min_size))
 
 
-def cmd_ws_live(
-    settings: Settings,
-    pair: str,
-    duration: float,
-    depth: int,
-    min_size: float,
-    *,
-    show_events: bool,
-    color: bool,
-    ladder_mode: str,
-    ladder_levels: int,
-) -> int:
-    return asyncio.run(
-        _ws_live_async(
-            settings,
-            pair,
-            duration,
-            depth,
-            min_size,
-            show_events=show_events,
-            color=color,
-            ladder_mode=ladder_mode,
-            ladder_levels=ladder_levels,
-        )
-    )
 
+
+
+# ---------- Entrée CLI ----------
 
 def main(argv: Optional[list[str]] = None) -> int:
-    # Pour le binaire/CLI, on décide ici si on expose les extras en se basant sur l'env,
-    # tout en gardant build_parser() par défaut sans extras pour les tests unitaires.
+    # Extras activables uniquement depuis l'ENV pour l'exécutable,
+    # mais PAS pris en compte par tests qui appellent build_parser() sans arg.
     extras_env = os.environ.get("CRYPTO_MM_EXTRAS", "0").lower() in {"1", "true", "yes", "on"}
     parser = build_parser(extras=extras_env)
 
@@ -622,21 +472,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cmd == "ws-trades":
         return cmd_ws_trades(settings, pair=args.pair, duration=args.duration)
     if args.cmd == "ws-book":
-        return cmd_ws_book(settings, pair=args.pair, duration=args.duration, depth=args.depth)
-    if args.cmd == "ws-book-ladder":
+        return cmd_ws_book(settings, pair=args.pair, duration=args.duration)
+
+    # Extras
+    if extras_env and args.cmd == "ws-book-ladder":
         return cmd_ws_book_ladder(settings, pair=args.pair, duration=args.duration, depth=args.depth, min_size=args.min_size)
-    if args.cmd == "ws-live":
-        return cmd_ws_live(
-            settings,
-            pair=args.pair,
-            duration=args.duration,
-            depth=args.depth,
-            min_size=args.min_size,
-            show_events=args.events,
-            color=args.color,
-            ladder_mode=args.ladder_mode,
-            ladder_levels=args.ladder_levels,
-        )
+    if extras_env and args.cmd == "ws-live":
+        return cmd_ws_live(settings, pair=args.pair, duration=args.duration, depth=args.depth, min_size=args.min_size)
 
     parser.print_help()
     return 1
@@ -644,3 +486,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+

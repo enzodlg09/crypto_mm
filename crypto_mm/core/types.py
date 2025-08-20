@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Literal
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel, Field
 
 
@@ -15,7 +17,7 @@ def utc_now_iso() -> str:
 
 Action = Literal["upsert", "delete"]
 BookType = Literal["snapshot", "delta"]
-
+Side = Literal["buy", "sell"]
 
 class L2Level(BaseModel):
     """
@@ -107,4 +109,32 @@ class TradeMessage(BaseModel):
     price_usd_per_btc: float = Field(..., ge=0.0)
     qty_btc: float = Field(..., ge=0.0)
     side: Literal["buy", "sell"]
+    trade_id: int
+
+
+@dataclass(frozen=True)
+class TradeRecord:
+    """
+    Trade tape record (dataclass, utilisé par tests & simulateur).
+
+    Notes
+    -----
+    - `ts_epoch` : timestamp UNIX (secondes UTC).
+    - `side` : côté agressif ('buy' ou 'sell').
+    - Les unités suivent les conventions du projet (USD/BTC, BTC).
+
+    Parameters
+    ----------
+    ts_epoch : float
+    symbol : str
+    side : {'buy','sell'}
+    price_usd_per_btc : float
+    qty_btc : float
+    trade_id : int
+    """
+    ts_epoch: float
+    symbol: str
+    side: Side
+    price_usd_per_btc: float
+    qty_btc: float
     trade_id: int
