@@ -4,11 +4,26 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="da36cbe6-0af8-4316-a605-c4dd6208fdbc" name="Changes" comment="stream data orderbook, restart from 7">
+    <list default="true" id="da36cbe6-0af8-4316-a605-c4dd6208fdbc" name="Changes" comment="ui before cleaning">
+      <change afterPath="$PROJECT_DIR$/crypto_mm/data/sample.jsonl" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/crypto_mm/data/sinks.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/crypto_mm/mm/inventory.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/crypto_mm/risk/limits.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/crypto_mm/sim/replay.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_inventory.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_limits.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_replay_integration.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/tests/test_sinks.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Makefile" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/crypto_mm/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/mm/quoting.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/mm/quoting.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/mm/spread_kpi.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/mm/spread_kpi.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/sim/execution.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/sim/execution.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/example.env" beforeDir="false" afterPath="$PROJECT_DIR$/example.env" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_execution.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_execution.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -41,6 +56,7 @@
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "Makefile Target.install-dev.executor": "Run",
     "Makefile Target.run.executor": "Run",
     "Makefile Target.test.executor": "Run",
     "Python.__init__.executor": "Run",
@@ -48,20 +64,31 @@
     "RunOnceActivity.OpenProjectViewOnStart": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "git-widget-placeholder": "master",
+    "last_opened_file_path": "C:/Users/enzom/PycharmProjects/crypto_mm/crypto_mm/sim",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
     "node.js.selected.package.eslint": "(autodetect)",
     "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable",
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
   <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\enzom\PycharmProjects\crypto_mm\crypto_mm\sim" />
+    </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\enzom\PycharmProjects\crypto_mm\crypto_mm" />
     </key>
   </component>
-  <component name="RunManager" selected="Python.main">
+  <component name="RunManager" selected="Makefile Target.install-dev">
+    <configuration name="install-dev" type="MAKEFILE_TARGET_RUN_CONFIGURATION" factoryName="Makefile" temporary="true">
+      <makefile filename="$PROJECT_DIR$/Makefile" target="install-dev" workingDirectory="" arguments="">
+        <envs />
+      </makefile>
+      <method v="2" />
+    </configuration>
     <configuration name="run" type="MAKEFILE_TARGET_RUN_CONFIGURATION" factoryName="Makefile" temporary="true">
       <makefile filename="$PROJECT_DIR$/Makefile" target="run" workingDirectory="" arguments="">
         <envs />
@@ -99,6 +126,7 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Makefile Target.install-dev" />
         <item itemvalue="Makefile Target.test" />
         <item itemvalue="Python.main" />
         <item itemvalue="Makefile Target.run" />
@@ -120,7 +148,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1755441197825</updated>
-      <workItem from="1755441203136" duration="13570000" />
+      <workItem from="1755441203136" duration="52757000" />
     </task>
     <task id="LOCAL-00001" summary="test">
       <option name="closed" value="true" />
@@ -138,7 +166,31 @@
       <option name="project" value="LOCAL" />
       <updated>1755451063620</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="ui done">
+      <option name="closed" value="true" />
+      <created>1755544391908</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1755544391908</updated>
+    </task>
+    <task id="LOCAL-00004" summary="ui before cleaning">
+      <option name="closed" value="true" />
+      <created>1755619191880</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1755619191880</updated>
+    </task>
+    <task id="LOCAL-00005" summary="ui before cleaning">
+      <option name="closed" value="true" />
+      <created>1755699985541</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1755699985541</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -147,7 +199,9 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="test" />
     <MESSAGE value="stream data orderbook, restart from 7" />
-    <option name="LAST_COMMIT_MESSAGE" value="stream data orderbook, restart from 7" />
+    <MESSAGE value="ui done" />
+    <MESSAGE value="ui before cleaning" />
+    <option name="LAST_COMMIT_MESSAGE" value="ui before cleaning" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/crypto_mm$main.coverage" NAME="main Coverage Results" MODIFIED="1755446766518" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/crypto_mm" />

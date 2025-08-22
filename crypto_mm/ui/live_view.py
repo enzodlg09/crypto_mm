@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 """
-TTY Live UI (single-window, 500ms refresh).
+TTY Live UI (single-window, ~500ms refresh).
 
 Left panel  : Order book (top10 cumulative) + Spread/Mid/Microprice
-              + Exec-spread KPIs + Ladder summary (BIDS/ASKS)
-Right panel : Events (snapshot / trades / resync) — aligned table:
-              tsZ | type | side | qty | price
+              + Exec-spread KPIs + Ladder summary
+              + STRATEGY: PnL R/U/T, Position/AvgPx/Exposure, Inventory sparkline, last simulated fills
+Right panel : LAST 10 TRADES — aligned table: tsZ | type | side | qty | price
 """
 
 import sys
 import time
-import re
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional, Sequence, TextIO, Tuple
 from collections import deque
 from datetime import datetime, timezone
+import math
+import shutil
 
 
 from ..core.types import utc_now_iso
@@ -23,12 +24,37 @@ from ..data.order_book import OrderBookL2
 from ..data.trade_tape import TradeTape, TradeRecord
 from ..mm.spread_kpi import KpiStore, spread_for_size
 
-
 # ============================== Models ==========================================
+
+SPARK_BARS = "▁▂▃▄▅▆▇█"
+
+
+@dataclass(frozen=True)
+class UiFill:
+    ts_epoch: float
+    side: str          # 'buy' | 'sell'
+    px: float
+    qty: float
+
 
 @dataclass
 class LiveState:
-    """Container passé au renderer."""
+    """State passed to the renderer.
+
+    Parameters
+    ----------
+    pair : str
+    order_book : OrderBookL2
+    trade_tape : TradeTape
+    depth : int
+    min_size : float
+    kpi_store : KpiStore
+    kpi_sizes : tuple[float, ...]
+
+    Strategy state (live) — updated by the main loop:
+    pnl_realized / pnl_unrealized / position_btc / avg_entry_px / exposure_usd
+    inv_history (sparkline), fills (last simulated fills)
+    """
     pair: str
     order_book: OrderBookL2
     trade_tape: TradeTape
@@ -36,6 +62,16 @@ class LiveState:
     min_size: float = 0.0
     kpi_store: KpiStore = field(default_factory=lambda: KpiStore(window_s=300))
     kpi_sizes: Tuple[float, ...] = (0.1, 1.0, 5.0, 10.0)
+
+    # ---------- STRATEGY STATE ----------
+    pnl_realized: float = 0.0
+    pnl_unrealized: float = 0.0
+    position_btc: float = 0.0
+    avg_entry_px: Optional[float] = None
+    exposure_usd: float = 0.0
+
+    inv_history: Deque[float] = field(default_factory=lambda: deque(maxlen=60))
+    fills: Deque[UiFill] = field(default_factory=lambda: deque(maxlen=8))
 
 
 @dataclass
@@ -74,29 +110,40 @@ def _cumsum(levels: Sequence[Tuple[float, float]], n: int) -> List[Tuple[float, 
     return out
 
 
-# ============================ Events ============================================
+def _iso(ts_epoch: float) -> str:
+    return datetime.fromtimestamp(ts_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
 
-@dataclass
-class _EventRow:
-    ts: str
-    etype: str   # snapshot | trade | resync | info
-    side: str = ""
-    qty: str = ""
-    price: str = ""
+
+def _sparkline(vals: Sequence[float], width: int) -> str:
+    if not vals or width <= 0:
+        return ""
+    vmin = min(vals)
+    vmax = max(vals)
+    if not (vmax > vmin):
+        return SPARK_BARS[len(SPARK_BARS) // 2] * min(width, len(vals))
+    # simple downsample to match width
+    step = max(1, len(vals) // width)
+    sample = list(vals)[-step * width::step]
+    out = []
+    for v in sample[-width:]:
+        t = (v - vmin) / (vmax - vmin)  # 0..1
+        idx = min(len(SPARK_BARS) - 1, max(0, int(round(t * (len(SPARK_BARS) - 1)))))
+        out.append(SPARK_BARS[idx])
+    return "".join(out)
 
 
 # ============================ Renderer ==========================================
 
 class LiveRenderer:
-    """Deux panneaux avec adressage ANSI (une seule fenêtre qui se met à jour)."""
+    """Two panels with ANSI cursor addressing (single window updated in place)."""
 
     # Layout (1-based)
     LEFT_COL = 2
-    WIDTH_TOTAL = 120
-    LEFT_WIDTH = 78
-    RIGHT_COL = LEFT_COL + LEFT_WIDTH + 2  # séparateur vertical à RIGHT_COL-2
+    WIDTH_TOTAL = 160         # canevas logique (borné à la largeur du terminal)
+    LEFT_WIDTH = 100
+    RIGHT_COL = LEFT_COL + LEFT_WIDTH + 4  # espace entre panneaux
 
-    # Rows (gauche)
+    # Rows (left)
     ROW_HEADER = 1
     ROW_SEP1 = 2
     ROW_TITLES = 3
@@ -105,123 +152,112 @@ class LiveRenderer:
     ROW_TOP_END = 14
     ROW_METRICS = 15
     ROW_SEP2 = 16
-    ROW_KPI1 = 17
-    ROW_KPI2 = 18
-    ROW_LADDER_HDR = 19
-    ROW_LADDER_BIDS = 20
-    ROW_LADDER_ASKS = 21
-    ROW_SEP3 = 22
 
-    # Rows (droite)
+    # --- KPIs spread ---
+    ROW_SPREAD_KPI_HDR = 17        # "SPREAD KPI"
+    ROW_SPREAD_KPI_COLHDR = 18     # entête colonnes
+    ROW_SPREAD_KPI_START = 19      # 19..22 (4 lignes pour 0.1/1/5/10)
+    ROW_SPREAD_KPI_END = 22
+
+    # --- Microprice volatility (fenêtre fixe 50) ---
+    ROW_MICROVOL_HDR = 23
+    ROW_MICROVOL_LINE = 24
+
+    ROW_LADDER_HDR = 25
+    ROW_LADDER_BIDS = 26
+    ROW_LADDER_ASKS = 27
+
+    # ---- STRATEGY block under ladder ----
+    ROW_STRAT_HDR = 28
+    ROW_STRAT_PNL = 29
+    ROW_STRAT_POS = 30
+    ROW_STRAT_INV = 31
+    ROW_FILLS_HDR = 32
+    ROW_FILLS_START = 33        # 33..39
+    ROW_FILLS_END = 39
+
+    ROW_SEP3 = 40  # separator before right panel
+
+    # Rows (right)
     ROW_RIGHT_TITLE = 3
-    ROW_RIGHT_START = 4        # 4..21
+    ROW_RIGHT_START = 4         # 4..21
     ROW_RIGHT_END = 21
 
-    # Col sizes (droite)
+    # Column widths (right)
     RIGHT_TS_W = 24
     RIGHT_TYPE_W = 9
     RIGHT_SIDE_W = 5
     RIGHT_QTY_W = 10
     RIGHT_PX_W = 14
 
-    # "trade buy 0.001 @ 116,000.00"
-    _TRADE_RE = re.compile(
-        r"^trade\s+(buy|sell)\s+([0-9]*\.?[0-9]+)\s*@\s*([0-9,]*\.?[0-9]+)$",
-        re.IGNORECASE,
-    )
+    # Exchange tick pour l’affichage du spread (Kraken cash)
+    TICK_SIZE = 0.10
+
+    # --- KPI table col widths (garde un léger retrait = "colonne vide") ---
+    KPI_INDENT = "  "           # colonne vide demandée
+    KPI_SIZE_W = 6
+    KPI_MED_W = 7
+    KPI_NOBS_W = 6
+    KPI_WIN_W = 8
+
+    # Fenêtre fixe pour la vol microprice
+    MICROVOL_N = 50
 
     def __init__(self, out: Optional[TextIO] = None, opts: Optional[RenderOptions] = None) -> None:
         self.out: TextIO = out if out is not None else sys.stdout
         self.opts = opts or RenderOptions()
         self.started = False
-        self.events: Deque[_EventRow] = deque(maxlen=(self.ROW_RIGHT_END - self.ROW_RIGHT_START + 1))
-        self._last_trade_event_id: Optional[int] = None
-        self._last_seen_trade: Optional[TradeRecord] = None
+        from collections import deque
+        # garde seulement les 50 derniers micro-prix
+        self._micro_samples: Deque[float] = deque(maxlen=self.MICROVOL_N)
 
-    # --------------- primitives d'écriture ---------------
+    # --------------- write primitive ---------------------
     def _w(self, s: str) -> None:
         try:
             self.out.write(s)
         except (ValueError, OSError):
             pass
 
-    # --------------- API évènements ----------------------
-    def add_event(self, msg: str) -> None:
-        """Append a parsed/normalized event row.
+    # --------------- geometry helpers --------------------
+    def _right_remaining(self) -> int:
+        """Remaining width for right panel given current terminal width."""
+        import shutil
+        try:
+            cols = shutil.get_terminal_size(fallback=(self.WIDTH_TOTAL, 40)).columns
+        except Exception:
+            cols = self.WIDTH_TOTAL
+        total_usable = min(cols, self.WIDTH_TOTAL)
+        rem = total_usable - (self.RIGHT_COL - 1)
+        return max(0, rem)
 
-        - Accepte le format structuré :  "trade <side> <qty> @ <price>"
-        - Tolère les messages "timestamp ... trad/snap" (génériques),
-          en réémettant un trade détaillé à partir de la tape si possible.
-        """
-        ts = utc_now_iso()
-        raw = msg.strip()
-        low = raw.lower()
-
-        # 1) Format structuré
-        m = self._TRADE_RE.match(raw)
-        if m:
-            side = m.group(1).lower()
-            qty = _fmt_qty(float(m.group(2)))
-            px = _fmt_price(float(m.group(3).replace(",", "")))
-            self.events.append(_EventRow(ts=ts, etype="trade", side=side, qty=qty, price=px))
-            return
-
-        # 2) Messages génériques "timestamp ... trad" / "timestamp ... snap"
-        #    -> on tente de reconstruire une ligne de trade depuis la tape
-        ends_with_trad = low.rstrip().endswith(" trad") or low.rstrip().endswith(" trade")
-        ends_with_snap = low.rstrip().endswith(" snap") or " snapshot" in low
-
-        if ends_with_trad:
-            if self._last_seen_trade is not None:
-                tr = self._last_seen_trade
-                self.events.append(
-                    _EventRow(
-                        ts=ts,
-                        etype="trade",
-                        side=tr.side,
-                        qty=_fmt_qty(tr.qty_btc),
-                        price=_fmt_price(tr.price_usd_per_btc),
-                    )
-                )
-            # Sinon, on ignore la ligne "trad" vide (pas d'infos utiles)
-            return
-
-        if ends_with_snap:
-            self.events.append(_EventRow(ts=ts, etype="snapshot"))
-            return
-
-        # 3) Autres messages : on peut soit ignorer, soit loguer en 'info'
-        # Pour éviter de polluer la table, on ignore par défaut.
-        return
-
-    # --------------- dessin statique ---------------------
+    # --------------- static drawing ----------------------
     def start(self, state: LiveState) -> None:
         if self.started:
             return
         # Clear + hide cursor
         self._w("\x1b[2J\x1b[H\x1b[?25l")
 
-        # Séparateur vertical
+        # vertical separator
         for r in range(self.ROW_TITLES, self.ROW_SEP3 + 1):
             self._w(_goto(r, self.RIGHT_COL - 2) + "│")
 
-        # Entêtes
+        # headings
         self._w(_goto(self.ROW_SEP1, 1) + "=" * self.WIDTH_TOTAL + _clear_line_right())
         self._w(_goto(self.ROW_TITLES, self.LEFT_COL) +
                 _c("36", "ORDER BOOK — TOP 10 LEVELS (cumulative sizes)", self.opts.color) +
                 _clear_line_right())
         self._w(
             _goto(self.ROW_TITLES, self.RIGHT_COL)
-            + _c("1", "LAST 10 TRADES (tsZ   type  side   qty     price)", self.opts.color)
+            + _c("1", "LAST 10 TRADES", self.opts.color)
             + _clear_line_right()
         )
 
-        # Sous-entêtes book
+        # left sub-headers
         hdr_l = f"{_c('32', 'BID px', self.opts.color):>10}  {_c('32', 'cum_btc', self.opts.color):>10}"
         hdr_r = f"{_c('31', 'ASK px', self.opts.color):>10}  {_c('31', 'cum_btc', self.opts.color):>10}"
         self._w(_goto(self.ROW_TOP_HDR, self.LEFT_COL) + f"{hdr_l:<28}  ||  {hdr_r:<28}" + _clear_line_right())
 
-        # Entête colonne droite
+        # Right table header
         right_hdr = (
             f"{'tsZ':<{self.RIGHT_TS_W}} "
             f"{'type':<{self.RIGHT_TYPE_W}} "
@@ -229,18 +265,44 @@ class LiveRenderer:
             f"{'qty':>{self.RIGHT_QTY_W}} "
             f"{'price':>{self.RIGHT_PX_W}}"
         )
-        self._w(_goto(self.ROW_RIGHT_TITLE, self.RIGHT_COL) + right_hdr + _clear_line_right())
+        rem = self._right_remaining()
+        if rem > 0:
+            self._w(_goto(self.ROW_RIGHT_TITLE, self.RIGHT_COL) + right_hdr[:rem] + _clear_line_right())
 
-        # Nettoyage des zones dynamiques
+        # clear dynamic areas (left)
         for r in range(self.ROW_TOP_START, self.ROW_TOP_END + 1):
             self._w(_goto(r, self.LEFT_COL) + _clear_line_right())
-        for r in (self.ROW_METRICS, self.ROW_SEP2, self.ROW_KPI1, self.ROW_KPI2,
-                  self.ROW_LADDER_HDR, self.ROW_LADDER_BIDS, self.ROW_LADDER_ASKS, self.ROW_SEP3):
+        for r in (
+            self.ROW_METRICS, self.ROW_SEP2,
+            self.ROW_SPREAD_KPI_HDR, self.ROW_SPREAD_KPI_COLHDR,
+            self.ROW_MICROVOL_HDR, self.ROW_MICROVOL_LINE
+        ):
             self._w(_goto(r, 1) + _clear_line_right())
+        for r in range(self.ROW_SPREAD_KPI_START, self.ROW_SPREAD_KPI_END + 1):
+            self._w(_goto(r, self.LEFT_COL) + _clear_line_right())
+
+        for r in (self.ROW_LADDER_HDR, self.ROW_LADDER_BIDS, self.ROW_LADDER_ASKS):
+            self._w(_goto(r, self.LEFT_COL) + _clear_line_right())
+
+        # Strategy area & fills
+        for r in (self.ROW_STRAT_HDR, self.ROW_STRAT_PNL, self.ROW_STRAT_POS,
+                  self.ROW_STRAT_INV, self.ROW_FILLS_HDR):
+            self._w(_goto(r, 1) + _clear_line_right())
+        for r in range(self.ROW_FILLS_START, self.ROW_FILLS_END + 1):
+            self._w(_goto(r, self.LEFT_COL) + _clear_line_right())
+
+        # right dynamic area
         for r in range(self.ROW_RIGHT_START, self.ROW_RIGHT_END + 1):
             self._w(_goto(r, self.RIGHT_COL) + _clear_line_right())
 
-        self.out.flush()
+        # separator before right panel
+        self._w(_goto(self.ROW_SEP3, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
+
+        try:
+            self.out.flush()
+        except Exception:
+            pass
+
         self.started = True
 
     def stop(self) -> None:
@@ -250,16 +312,21 @@ class LiveRenderer:
         except Exception:
             pass
 
-    # --------------- mise à jour périodique --------------
+    # --------------- periodic update ---------------------
     def update(self, state: LiveState) -> None:
+        import math, time
         ob = state.order_book
         tape = state.trade_tape
 
-        # Header (pair + UTC now)
+        # keep the gutter crisp after resizes
+        for r in range(self.ROW_TITLES, self.ROW_SEP3 + 1):
+            self._w(_goto(r, self.RIGHT_COL - 2) + "│")
+
+        # header (pair + UTC now)
         self._w(_goto(self.ROW_HEADER, self.LEFT_COL) +
                 _c("1", f"{state.pair}  @ {utc_now_iso()}", self.opts.color) + _clear_line_right())
 
-        # Top10 cumulé
+        # left — top10 cumulative
         top = ob.top(50)
         bids = top["bids"]
         asks = top["asks"]
@@ -278,51 +345,143 @@ class LiveRenderer:
                 ar = ""
             self._w(_goto(row, self.LEFT_COL) + f"{bl:<28}  ||  {ar:<28}"[:self.LEFT_WIDTH] + _clear_line_right())
 
-        # Spread / Mid / Microprice
+        # left — metrics (spread/mid/micro) avec spread basé sur le tick
         best_bid = bids[0] if bids else None
         best_ask = asks[0] if asks else None
         if best_bid and best_ask:
-            spr = best_ask[0] - best_bid[0]
-            spread = f"${_fmt_price(spr)}  ({int(spr/1.0)} ticks)"
+            raw = best_ask[0] - best_bid[0]
+            ticks = max(0, int(round(raw / self.TICK_SIZE)))
+            spr_disp = ticks * self.TICK_SIZE
+            spread = f"${_fmt_price(spr_disp)}  ({ticks} ticks)"
         else:
             spread = "—"
-        mid = ob.mid_price()
-        micro = ob.microprice()
-        mid_s = _fmt_price(mid) if mid == mid else "—"
-        micro_s = _fmt_price(micro) if micro == micro else "—"
+        mid_val = ob.mid_price()
+        micro_val = ob.microprice()
+        mid_s = _fmt_price(mid_val) if mid_val == mid_val else "—"
+        micro_s = _fmt_price(micro_val) if micro_val == micro_val else "—"
         metrics = f"Spread: {spread}   |   Mid: {mid_s}   |   Microprice: {micro_s}"
         self._w(_goto(self.ROW_METRICS, self.LEFT_COL) + _c("36", metrics, self.opts.color) + _clear_line_right())
 
-        # KPIs: spreads exécutables
+        # --- KPI spread (table size | median | n_obs | window_s) ---
+        self._w(_goto(self.ROW_SEP2, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
+        self._w(_goto(self.ROW_SPREAD_KPI_HDR, self.LEFT_COL) + _c("1", "SPREAD KPI", self.opts.color) + _clear_line_right())
+
+        # ligne d'entête des colonnes (alignée + colonne vide à gauche)
+        colhdr = (
+            f"{self.KPI_INDENT}"
+            f"{'size':>{self.KPI_SIZE_W}} | "
+            f"{'median':>{self.KPI_MED_W}} | "
+            f"{'n_obs':>{self.KPI_NOBS_W}} | "
+            f"{'window_s':>{self.KPI_WIN_W}}"
+        )
+        self._w(_goto(self.ROW_SPREAD_KPI_COLHDR, self.LEFT_COL) + colhdr[:self.LEFT_WIDTH] + _clear_line_right())
+
+        # Alimenter la fenêtre (mesures instantanées)
         now = time.time()
         book = {"bids": bids, "asks": asks}
-        inst_vals: List[Optional[float]] = []
         for s in state.kpi_sizes:
             v = spread_for_size(book, s)
+            v = None if (v is None or v < 0) else v  # ignore inversions
             state.kpi_store.append(now, s, v)
-            inst_vals.append(v)
 
         agg = state.kpi_store.aggregates(now_epoch=now)
-        med = {float(k): float(agg.loc[k, "median"]) for k in agg.index} if not agg.empty else {}
+        cols = set(map(str, getattr(agg, "columns", [])))
 
-        def _fmt(v: Optional[float]) -> str:
-            return "—" if v is None else f"${v:,.2f}"
+        def _pick(*names: str) -> Optional[str]:
+            for n in names:
+                if n in cols:
+                    return n
+            return None
 
-        # Lignes compactes → tiennent dans LEFT_WIDTH
-        inst_line = " | ".join(f"{s:g}: {_fmt(v)}" for s, v in zip(state.kpi_sizes, inst_vals))
-        med_line = " | ".join(f"{s:g}: {_fmt(med.get(float(s)))}" for s in state.kpi_sizes)
+        col_med = _pick("median", "p50", "med")
+        col_cnt = _pick("count", "n_obs", "n")
 
-        self._w(_goto(self.ROW_SEP2, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
-        self._w(_goto(self.ROW_KPI1, self.LEFT_COL) + _c("1", "EXEC SPREADS (instant)  ", self.opts.color) +
-                inst_line[:self.LEFT_WIDTH] + _clear_line_right())
-        self._w(_goto(self.ROW_KPI2, self.LEFT_COL) + _c("1", "EXEC SPREADS (5m median) ", self.opts.color) +
-                med_line[:self.LEFT_WIDTH] + _clear_line_right())
+        def _cell_med(v: Optional[float]) -> str:
+            return f"{v:>{self.KPI_MED_W}.2f}" if v is not None else " " * (self.KPI_MED_W - 1) + "—"
+        def _cell_int(n: Optional[int]) -> str:
+            return f"{n:>{self.KPI_NOBS_W}d}" if n is not None else f"{0:>{self.KPI_NOBS_W}d}"
 
-        # Ladder propre (2 lignes)
-        b_lvls = [(p, q) for (p, q) in bids if q >= state.min_size]
-        a_lvls = [(p, q) for (p, q) in asks if q >= state.min_size]
+        sizes = list(state.kpi_sizes)  # 4 tailles
+        for i, s in enumerate(sizes):
+            row = self.ROW_SPREAD_KPI_START + i
+            med_val = None
+            n_obs = 0
+            if not getattr(agg, "empty", True):
+                # clé robuste
+                idx = None
+                for cand in (float(s), s, str(s)):
+                    try:
+                        _ = agg.loc[cand]
+                        idx = cand
+                        break
+                    except Exception:
+                        continue
+                if idx is not None:
+                    r = agg.loc[idx]
+                    if col_med and col_med in agg.columns:
+                        try:
+                            mv = float(r[col_med])
+                            med_val = mv if (mv == mv) else None
+                        except Exception:
+                            med_val = None
+                    if col_cnt and col_cnt in agg.columns:
+                        try:
+                            nv = int(r[col_cnt]) if r[col_cnt] == r[col_cnt] else 0
+                        except Exception:
+                            nv = 0
+                        n_obs = nv
+
+            line = (
+                f"{self.KPI_INDENT}"
+                f"{s:>{self.KPI_SIZE_W}g} | "
+                f"{_cell_med(med_val)} | "
+                f"{_cell_int(n_obs)} | "
+                f"{state.kpi_store.window_s:>{self.KPI_WIN_W}d}"
+            )
+            self._w(_goto(row, self.LEFT_COL) + line[:self.LEFT_WIDTH] + _clear_line_right())
+
+        # --- MICROPRICE VOL (σ over last 50 samples) ---
+        self._w(_goto(self.ROW_MICROVOL_HDR, self.LEFT_COL) +
+                _c("1", "MICRO VOL (last 50 samples)", self.opts.color) + _clear_line_right())
+
+        # push current micro sample (fenêtre fixe N)
+        if micro_val == micro_val:
+            self._micro_samples.append(float(micro_val))
+
+        def _std(vals: List[float]) -> Optional[float]:
+            if len(vals) < 2:
+                return None
+            m = sum(vals) / len(vals)
+            var = sum((v - m) ** 2 for v in vals) / (len(vals) - 1)
+            return math.sqrt(var)
+
+        px_vals = list(self._micro_samples)
+        px_std = _std(px_vals)
+
+        rets: List[float] = []
+        for i in range(1, len(px_vals)):
+            p0, p1 = px_vals[i - 1], px_vals[i]
+            if p0 > 0:
+                rets.append((p1 / p0) - 1.0)
+        ret_std_bps = (_std(rets) * 10_000.0) if len(rets) >= 2 else None
+
+        n_samp = len(px_vals)
+        vol_line = (
+            f"σ_px=${px_std:,.2f}" if px_std is not None else "σ_px=—"
+        ) + "   " + (
+            f"σ_ret={ret_std_bps:,.1f} bps" if ret_std_bps is not None else "σ_ret=—"
+        ) + f"   samples={n_samp:d}   window_n={self.MICROVOL_N:d}"
+        self._w(_goto(self.ROW_MICROVOL_LINE, self.LEFT_COL) + vol_line[:self.LEFT_WIDTH] + _clear_line_right())
+
+        # left — ladder summary (with clearer ranges + $ depth)
+        b_lvls = [(p, q) for (p, q) in bids[:state.depth] if q >= state.min_size]
+        a_lvls = [(p, q) for (p, q) in asks[:state.depth] if q >= state.min_size]
         b_sum = sum(q for _, q in b_lvls)
         a_sum = sum(q for _, q in a_lvls)
+        # USD depth approx using mid
+        mid_px = mid_val if mid_val == mid_val else (a_lvls[0][0] if a_lvls else (b_lvls[0][0] if b_lvls else 0.0))
+        b_depth_usd = b_sum * mid_px
+        a_depth_usd = a_sum * mid_px
         b_rng = f"{int(b_lvls[-1][0])}..{int(b_lvls[0][0])}" if b_lvls else "—"
         a_rng = f"{int(a_lvls[0][0])}..{int(a_lvls[-1][0])}" if a_lvls else "—"
 
@@ -330,68 +489,133 @@ class LiveRenderer:
                 _c("1", f"LADDER (min_size={state.min_size:g}, depth={state.depth})", self.opts.color) +
                 _clear_line_right())
         self._w(_goto(self.ROW_LADDER_BIDS, self.LEFT_COL) +
-                (f"BIDS ≥{state.min_size:g}: lvls={len(b_lvls):<3}  sum={_fmt_qty(b_sum)} BTC  |  range {b_rng}")[:self.LEFT_WIDTH] +
+                (f"BIDS ≥{state.min_size:g}: lvls={len(b_lvls):<2}  "
+                 f"sum={_fmt_qty(b_sum)} BTC  |  depth≈ ${b_depth_usd:,.2f}  |  range {b_rng}")[:self.LEFT_WIDTH] +
                 _clear_line_right())
         self._w(_goto(self.ROW_LADDER_ASKS, self.LEFT_COL) +
-                (f"ASKS ≥{state.min_size:g}: lvls={len(a_lvls):<3}  sum={_fmt_qty(a_sum)} BTC  |  range {a_rng}")[:self.LEFT_WIDTH] +
+                (f"ASKS ≥{state.min_size:g}: lvls={len(a_lvls):<2}  "
+                 f"sum={_fmt_qty(a_sum)} BTC  |  depth≈ ${a_depth_usd:,.2f}  |  range {a_rng}")[:self.LEFT_WIDTH] +
                 _clear_line_right())
 
-        # Séparateur avant panneau droit
-        self._w(_goto(self.ROW_SEP3, 1) + "-" * self.WIDTH_TOTAL + _clear_line_right())
+        # -------------------- STRATEGY STATE (under ladder) --------------------
+        pnl_r = state.pnl_realized
+        pnl_u = state.pnl_unrealized
+        pnl_t = pnl_r + pnl_u
 
-        # ====== Right panel: LAST TRADES (side / qty / price) ======
-        width = self.WIDTH_TOTAL - self.RIGHT_COL - 1
+        def _clr_sign(v: float) -> str:
+            if not self.opts.color:
+                return f"{v:,.2f}"
+            if v > 1e-12:
+                return _c("32", f"+{v:,.2f}", True)   # green
+            if v < -1e-12:
+                return _c("31", f"{v:,.2f}", True)    # red
+            return f"{v:,.2f}"
 
-        # On prend les N derniers trades de la tape (nouveaux en bas)
-        nrows = self.ROW_RIGHT_END - self.ROW_RIGHT_START + 1
-        trades = state.trade_tape.last(nrows)
-        pad = nrows - len(trades)
+        self._w(_goto(self.ROW_STRAT_HDR, self.LEFT_COL) +
+                _c("1", "STRATEGY — PnL / Position / Inventory / Sim Fills", self.opts.color) +
+                _clear_line_right())
 
-        # Lignes vides (en haut) si peu de trades
-        for i in range(pad):
-            row = self.ROW_RIGHT_START + i
-            self._w(_goto(row, self.RIGHT_COL) + _clear_line_right())
+        pnl_line = f"PnL R/U/T: { _clr_sign(pnl_r) } / { _clr_sign(pnl_u) } / { _clr_sign(pnl_t) }  USD"
+        self._w(_goto(self.ROW_STRAT_PNL, self.LEFT_COL) + pnl_line[:self.LEFT_WIDTH] + _clear_line_right())
 
-        # Rendu des trades (du plus ancien au plus récent)
-        for i, tr in enumerate(trades[-nrows:]):
-            row = self.ROW_RIGHT_START + pad + i
+        avgpx = "—" if state.avg_entry_px is None or not (state.avg_entry_px == state.avg_entry_px) else _fmt_price(state.avg_entry_px)
+        pos_line = (
+            f"POS: {_fmt_qty(state.position_btc)} BTC  |  AvgPx: {avgpx}  |  Exposure: {_fmt_price(state.exposure_usd)} USD"
+        )
+        self._w(_goto(self.ROW_STRAT_POS, self.LEFT_COL) + pos_line[:self.LEFT_WIDTH] + _clear_line_right())
 
-            # tsZ : si on a un epoch, on le formate; sinon on garde tr.ts
-            tsZ: str
-            if hasattr(tr, "ts_epoch") and tr.ts_epoch is not None:
-                tsZ = datetime.fromtimestamp(float(tr.ts_epoch), tz=timezone.utc).isoformat(timespec="seconds").replace(
-                    "+00:00", "Z")
+        # Inventory sparkline
+        hist = list(state.inv_history)
+        if hist:
+            span = (min(hist), max(hist))
+            spark_w = max(40, min(60, self.LEFT_WIDTH - 40))
+            SPARK_BARS = "▁▂▃▄▅▆▇█"
+            if span[1] > span[0]:
+                def _to_bar(v: float) -> str:
+                    t = (v - span[0]) / (span[1] - span[0])
+                    idx = min(len(SPARK_BARS) - 1, max(0, int(round(t * (len(SPARK_BARS) - 1)))))
+                    return SPARK_BARS[idx]
+                step = max(1, len(hist) // spark_w)
+                sample = hist[-step * spark_w::step][-spark_w:]
+                spark = "".join(_to_bar(v) for v in sample)
             else:
-                tsZ = getattr(tr, "ts", "") or utc_now_iso()
+                spark = "▅" * spark_w
+            inv_legend = f"INV: last={_fmt_qty(hist[-1])} BTC  [{_fmt_qty(span[0])} .. {_fmt_qty(span[1])}]"
+            self._w(_goto(self.ROW_STRAT_INV, self.LEFT_COL) + (inv_legend + "  " + spark)[:self.LEFT_WIDTH] + _clear_line_right())
+        else:
+            self._w(_goto(self.ROW_STRAT_INV, self.LEFT_COL) + "INV: —" + _clear_line_right())
 
-            typ = _c("35", "trade", self.opts.color)  # violet
-            side_col = _c("32", "buy", self.opts.color) if tr.side == "buy" else _c("31", "sell", self.opts.color)
-            qty_s = _fmt_qty(float(getattr(tr, "qty_btc", 0.0)))
-            px_s = _fmt_price(float(getattr(tr, "price_usd_per_btc", 0.0)))
+        # Fills header
+        self._w(_goto(self.ROW_FILLS_HDR, self.LEFT_COL) + _c("1", "SIM FILLS (last)", self.opts.color) + _clear_line_right())
 
-            line = (
-                f"{tsZ:<{self.RIGHT_TS_W}} "
-                f"{typ:<{self.RIGHT_TYPE_W}} "
-                f"{side_col:<{self.RIGHT_SIDE_W}} "
-                f"{qty_s:>{self.RIGHT_QTY_W}} "
-                f"{px_s:>{self.RIGHT_PX_W}}"
-            )
-            self._w(_goto(row, self.RIGHT_COL) + line[:width] + _clear_line_right())
-        # Remember latest trade (for converting generic 'trad' lines)
+        # Last simulated fills
+        nrows = self.ROW_FILLS_END - self.ROW_FILLS_START + 1
+        fills_list: List[Optional[UiFill]] = list(state.fills)[-nrows:]
+        if len(fills_list) < nrows:
+            fills_list = [None] * (nrows - len(fills_list)) + fills_list  # top padding
+
+        for i, f in enumerate(fills_list):
+            row = self.ROW_FILLS_START + i
+            if f is None:
+                self._w(_goto(row, self.LEFT_COL) + _clear_line_right())
+                continue
+            tsZ = _iso(f.ts_epoch)
+            side_txt = "buy" if f.side == "buy" else "sell"
+            if self.opts.color:
+                side_txt = _c("32", "buy", True) if f.side == "buy" else _c("31", "sell", True)
+            qty_s = _fmt_qty(f.qty)
+            px_s = _fmt_price(f.px)
+            line = f"{tsZ}  {side_txt:<5}  qty={qty_s:>10}  px={px_s:>12}"
+            self._w(_goto(row, self.LEFT_COL) + line[:self.LEFT_WIDTH] + _clear_line_right())
+
+        # =================== RIGHT PANEL: LAST TRADES ===========================
+        rem = self._right_remaining()
+        if rem > 0:
+            hdr = (
+                f"{'tsZ':<{self.RIGHT_TS_W}} "
+                f"{'type':<{self.RIGHT_TYPE_W}} "
+                f"{'side':<{self.RIGHT_SIDE_W}} "
+                f"{'qty':>{self.RIGHT_QTY_W}} "
+                f"{'price':>{self.RIGHT_PX_W}}"
+            )[:rem]
+            self._w(_goto(self.ROW_RIGHT_TITLE, self.RIGHT_COL) + hdr + _clear_line_right())
+
+            nrows_right = self.ROW_RIGHT_END - self.ROW_RIGHT_START + 1
+            trades: List[TradeRecord] = tape.last(nrows_right)
+            if len(trades) < nrows_right:
+                lines: List[Optional[TradeRecord]] = [None] * (nrows_right - len(trades)) + trades
+            else:
+                lines = trades[-nrows_right:]  # oldest .. newest
+
+            for i, tr in enumerate(lines):
+                row = self.ROW_RIGHT_START + i
+                if tr is None:
+                    self._w(_goto(row, self.RIGHT_COL) + _clear_line_right())
+                    continue
+                tsZ = _iso(tr.ts_epoch)
+                typ = "trade"
+                side_txt = tr.side
+                qty_s = _fmt_qty(tr.qty_btc)
+                px_s = _fmt_price(tr.price_usd_per_btc)
+                line = (
+                    f"{tsZ:<{self.RIGHT_TS_W}} "
+                    f"{typ:<{self.RIGHT_TYPE_W}} "
+                    f"{side_txt:<{self.RIGHT_SIDE_W}} "
+                    f"{qty_s:>{self.RIGHT_QTY_W}} "
+                    f"{px_s:>{self.RIGHT_PX_W}}"
+                )[:rem]
+                self._w(_goto(row, self.RIGHT_COL) + line + _clear_line_right())
 
         try:
             self.out.flush()
         except Exception:
             pass
 
-
-# ============================ Façade module =====================================
-
 _RENDERER: Optional[LiveRenderer] = None
 
 
 def render(state: LiveState, *, out: Optional[TextIO] = None, opts: Optional[RenderOptions] = None) -> None:
-    """Render/update la live UI."""
+    """Render/update the live UI."""
     global _RENDERER
     if _RENDERER is None or (out is not None and _RENDERER.out is not out):
         _RENDERER = LiveRenderer(out=out, opts=opts)
@@ -403,14 +627,7 @@ def render(state: LiveState, *, out: Optional[TextIO] = None, opts: Optional[Ren
 
 
 def stop_render() -> None:
-    """Restore le curseur à la fin."""
+    """Restore cursor visibility at the end."""
     global _RENDERER
     if _RENDERER is not None:
         _RENDERER.stop()
-
-
-def log_event(msg: str) -> None:
-    """Append un évènement dans le panneau de droite."""
-    global _RENDERER
-    if _RENDERER is not None:
-        _RENDERER.add_event(msg)

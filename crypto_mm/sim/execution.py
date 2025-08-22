@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Iterable, List, Optional, Tuple, Protocol
 
-
 logger = logging.getLogger("sim.exec")
 
 
 class _TradeLike(Protocol):
     """
     Contrat minimal attendu pour un trade de la bande (duck-typing).
-    Compatible avec crypto_mm.core.types.TradeRecord.
+
+    Compatible avec crypto_mm.data.trade_tape.TradeRecord.
     """
     ts_epoch: float
     symbol: str
@@ -65,7 +65,7 @@ class FillEvent:
     ts_trade : float
         Timestamp UNIX de la transaction de bande utilisée.
     ts_fill : float
-        Timestamp UNIX du fill effectif (ici = ts_trade).
+        Timestamp UNIX du fill effectif (latence incluse = ts_trade ici).
     """
     side: str
     px: float
@@ -75,6 +75,7 @@ class FillEvent:
 
 
 def _rng_bool(p: float, rng: Optional[random.Random]) -> bool:
+    """Tir bernoulli(p) avec générateur optionnel (tests déterministes)."""
     if p >= 1.0:
         return True
     if p <= 0.0:
@@ -121,7 +122,7 @@ def simulate_fills(
     Returns
     -------
     list[FillEvent]
-        Liste ordonnée de fills simulés.
+        Liste ordonnée de fills simulés (respect du séquencement & conservation).
     """
     t_active = quotes.ts_place_epoch + latency_ms / 1000.0
     rem_bid = max(0.0, float(quotes.bid_qty))

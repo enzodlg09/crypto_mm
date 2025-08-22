@@ -1,143 +1,94 @@
 from __future__ import annotations
-
-import time
-from dataclasses import dataclass, field
+import math
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import numpy as np
 import pandas as pd
 
-BookSide = Sequence[Tuple[float, float]]  # (price_usd_per_btc, qty_btc)
-Book = Dict[str, BookSide]  # {"bids": [(px,qty),...], "asks": [(px,qty),...]}
 
-
-def executable_px(side_levels: BookSide, size_btc: float) -> Optional[float]:
-    """
-    Calcule le prix moyen d'exécution (VWAP) pour consommer `size_btc` sur un côté du carnet.
-
-    Le comportement dépend de l'ordre fourni:
-    - **asks** attendus triés **ascendant** (du moins cher au plus cher)
-    - **bids** attendus triés **descendant** (du plus cher au moins cher)
-
-    La fonction consomme dans **l'ordre fourni** et prend partiellement le dernier niveau si besoin.
-
-    Parameters
-    ----------
-    side_levels : Sequence[Tuple[float, float]]
-        Niveaux [(price_usd_per_btc, qty_btc), ...] dans l'ordre d'exécution.
-    size_btc : float
-        Taille (BTC) à exécuter.
-
-    Returns
-    -------
-    float | None
-        Prix moyen USD/BTC si profondeur suffisante, sinon None.
-
-    Examples
-    --------
-    >>> executable_px([(100.0, 0.5), (101.0, 1.0)], 0.6)
-    100.16666666666667
-    """
-    need = float(size_btc)
-    if need <= 0.0:
-        return 0.0
-
+def _vwap(levels: Sequence[Tuple[float, float]], size_btc: float) -> Optional[float]:
+    """VWAP pour consommer `size_btc` sur une liste triée (bids desc, asks asc)."""
+    if size_btc <= 0.0:
+        return None
+    rem = float(size_btc)
     cost = 0.0
     taken = 0.0
-    for px, qty in side_levels:
-        if need <= 0:
-            break
-        if qty <= 0:
+    for px, qty in levels:
+        if qty <= 0.0:
             continue
-        take = min(need, qty)
-        cost += px * take
+        take = qty if rem > qty else rem
+        cost += take * px
         taken += take
-        need -= take
-
-    if taken + 1e-15 < size_btc:
+        rem -= take
+        if rem <= 1e-12:
+            break
+    if taken + 1e-12 < size_btc:
         return None
-    return cost / taken if taken > 0 else None
+    return cost / taken
 
 
-def spread_for_size(book: Book, size_btc: float) -> Optional[float]:
+def spread_for_size(book: Dict[str, Sequence[Tuple[float, float]]], size_btc: float) -> Optional[float]:
     """
-    Spread exécutable pour `size_btc`: ask_exec(size) - bid_exec(size).
-
-    Parameters
-    ----------
-    book : dict
-        {"bids": [(px,qty), ... desc], "asks": [(px,qty), ... asc]}
-    size_btc : float
-        Taille à exécuter sur chaque côté.
-
-    Returns
-    -------
-    float | None
-        Spread en USD (None si profondeur insuffisante d'un côté).
+    Spread exécutable pour `size_btc`: VWAP(asks,size) - VWAP(bids,size).
+    Retourne None si profondeur insuffisante ou si size<=0.
     """
-    ask_px = executable_px(book.get("asks", ()), size_btc)
-    bid_px = executable_px(book.get("bids", ()), size_btc)
-    if ask_px is None or bid_px is None:
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    if not bids or not asks or size_btc <= 0.0:
         return None
-    return ask_px - bid_px
+    bid_vwap = _vwap(bids, size_btc)
+    ask_vwap = _vwap(asks, size_btc)
+    if bid_vwap is None or ask_vwap is None:
+        return None
+    return ask_vwap - bid_vwap
 
 
-@dataclass
 class KpiStore:
-    """
-    Stocke les spreads exécutables et calcule des agrégations **rolling** (fenêtre glissante).
+    """Stocke des mesures de spread exécutable et fournit des agrégats glissants."""
 
-    Parameters
-    ----------
-    window_s : int
-        Fenêtre en secondes (ex: 300 pour 5 minutes).
-    """
-    window_s: int = 300
-    _df: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["ts", "size", "spread"]))
+    def __init__(self, window_s: int = 300) -> None:
+        self.window_s = int(window_s)
+        # colonnes typées pour éviter les warnings de concat/NA
+        self._df = pd.DataFrame({"ts": pd.Series(dtype="float64"),
+                                 "size_btc": pd.Series(dtype="float64"),
+                                 "value": pd.Series(dtype="float64")})
 
-    def append(self, ts_epoch: float, size_btc: float, spread_usd: Optional[float]) -> None:
-        """Ajoute un point (ignore si spread None)."""
-        if spread_usd is None:
+    def append(self, ts_epoch: float, size_btc: float, value: Optional[float]) -> None:
+        """
+        Ajoute un point si `value` est finie (ni None, ni NaN/inf), puis trim la fenêtre.
+        """
+        if value is None:
             return
-        row = pd.DataFrame({"ts": [float(ts_epoch)], "size": [float(size_btc)], "spread": [float(spread_usd)]})
-        self._df = pd.concat([self._df, row], ignore_index=True)
+        try:
+            v = float(value)
+        except Exception:
+            return
+        if not math.isfinite(v):
+            return
 
-    def _windowed(self, now_epoch: Optional[float] = None) -> pd.DataFrame:
-        now = float(now_epoch) if now_epoch is not None else time.time()
-        cutoff = now - self.window_s
-        df = self._df
-        if df.empty:
-            return df
-        return df[df["ts"] >= cutoff]
+        rec = {"ts": float(ts_epoch), "size_btc": float(size_btc), "value": v}
+        # Pas de concat (évite FutureWarning), on append via .loc
+        self._df.loc[len(self._df)] = rec
+        self._trim(ts_epoch)
+
+    def _trim(self, now_epoch: float) -> None:
+        """Conserve uniquement la fenêtre [now - window_s, now]."""
+        if self._df.empty:
+            return
+        cutoff = float(now_epoch) - float(self.window_s)
+        self._df = self._df[self._df["ts"] >= cutoff]
 
     def aggregates(self, now_epoch: Optional[float] = None) -> pd.DataFrame:
         """
-        Agrégations rolling par taille: count, mean, median, min, max.
-
-        Returns
-        -------
-        pd.DataFrame
-            Index = size, colonnes = ["count","mean","median","min","max"].
+        Retourne un DataFrame indexé par `size_btc` avec:
+          - median, p25, p75, count
         """
-        win = self._windowed(now_epoch)
-        if win.empty:
-            return pd.DataFrame(columns=["count", "mean", "median", "min", "max"])
-        g = win.groupby("size")["spread"]
-        out = pd.DataFrame({
-            "count": g.count().astype(int),
-            "mean": g.mean(),
-            "median": g.median(),
-            "min": g.min(),
-            "max": g.max(),
-        })
-        return out.sort_index()
-
-    def latest_for_sizes(self, sizes: Iterable[float]) -> Dict[float, Optional[float]]:
-        """Renvoie le dernier spread (non agrégé) vu pour chaque taille (ou None)."""
-        out: Dict[float, Optional[float]] = {}
         if self._df.empty:
-            return {float(s): None for s in sizes}
-        for s in sizes:
-            sdf = self._df[self._df["size"] == float(s)]
-            out[float(s)] = None if sdf.empty else float(sdf.iloc[-1]["spread"])
+            return pd.DataFrame(columns=["median", "p25", "p75", "count"])
+        g = self._df.groupby("size_btc")["value"]
+        out = pd.DataFrame({
+            "median": g.median(),
+            "p25": g.quantile(0.25),
+            "p75": g.quantile(0.75),
+            "count": g.count(),
+        })
         return out
