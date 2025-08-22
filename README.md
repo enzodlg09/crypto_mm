@@ -2,6 +2,7 @@
 
 # crypto\_mm — Market Making (Kraken WS v2)
 
+Dans l'example.env, Il y a la clef d'api si vous voulez run. Elle est active jusqu'au 20 septembre.
 
 ### 1) Installation (Windows PowerShell)
 

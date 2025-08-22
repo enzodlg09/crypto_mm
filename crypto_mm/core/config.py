@@ -34,7 +34,6 @@ class YamlSettingsSource(PydanticBaseSettingsSource):
         self._data = data
         return data
 
-    # required by pydantic-settings v2
     def get_field_value(self, field, field_name):  # type: ignore[override]
         data = self._data if self._data is not None else self._load()
         if field_name in data:
@@ -51,8 +50,6 @@ class DotEnvAutoSource(PydanticBaseSettingsSource):
     1) CRYPTO_MM_ENV_FILE (if exists)
     2) example.env (if exists)
     3) .env (if exists)
-
-    Keys are mapped by lowercasing (e.g. HEARTBEAT_MS -> heartbeat_ms).
     """
 
     def __init__(self, settings_cls):
@@ -91,8 +88,7 @@ class DotEnvAutoSource(PydanticBaseSettingsSource):
         self._data = out
         return out
 
-    # required by pydantic-settings v2
-    def get_field_value(self, field, field_name):  # type: ignore[override]
+    def get_field_value(self, field, field_name):
         data = self._data if self._data is not None else self._load()
         if field_name in data:
             return data[field_name], field_name, False
@@ -157,5 +153,4 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    """Load & validate settings."""
     return Settings()

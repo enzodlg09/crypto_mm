@@ -167,7 +167,7 @@ class KrakenWSV2Client:
         ws: WebSocketClientProtocol = await ws_connect(
             self.settings.websocket_url or KRAKEN_WSS_V2,
             ssl=ssl_ctx,
-            ping_interval=None,  # we'll use v2 ping; protocol-level is handled by lib
+            ping_interval=None,
             max_queue=4096,
         )
         self.logger.info({"event": "ws.connected", "ts": utc_now_iso(), "session": self.session_id})
@@ -186,7 +186,6 @@ class KrakenWSV2Client:
         self.logger.info({"event": "ws.subscribe", "ts": utc_now_iso(), "channel": channel, "params": params})
 
     async def _recv_json(self, ws: WebSocketClientProtocol) -> Any:
-        # Use parse_float=str to preserve full precision for checksum v2 (see guide)
         raw = await ws.recv()
         return json.loads(raw, parse_float=str)
 

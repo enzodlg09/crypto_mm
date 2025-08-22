@@ -18,7 +18,6 @@ class Quote:
 # ---------- precise step rounding helpers ----------
 
 def _step_from(tick: Optional[float], bucket_size: Optional[float]) -> Decimal:
-    """Choose quoting step: tick>0, else bucket_size>0, else 0.01."""
     if tick is not None and tick > 0:
         return Decimal(str(tick))
     if bucket_size is not None and bucket_size > 0:
@@ -27,10 +26,6 @@ def _step_from(tick: Optional[float], bucket_size: Optional[float]) -> Decimal:
 
 
 def _round_to_step_half_up(px: Decimal, step: Decimal) -> Decimal:
-    """
-    Nearest multiple of `step` using HALF_UP:
-      round( px/step ) * step
-    """
     if step <= 0:
         return px
     units = (px / step).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
@@ -39,7 +34,6 @@ def _round_to_step_half_up(px: Decimal, step: Decimal) -> Decimal:
 
 
 def _ceil_to_step(x: Decimal, step: Decimal) -> Decimal:
-    """Ceil to next multiple of step."""
     if step <= 0:
         return x
     units = (x / step).to_integral_value(rounding=ROUND_CEILING)
@@ -47,9 +41,6 @@ def _ceil_to_step(x: Decimal, step: Decimal) -> Decimal:
 
 
 def _ensure_min_separation_decimal(bid: Decimal, ask: Decimal, step: Decimal) -> tuple[Decimal, Decimal]:
-    """
-    Force ask >= bid + step (bump ask only, to the next multiple of `step`).
-    """
     min_ask = bid + step
     if ask < min_ask:
         ask = _ceil_to_step(min_ask, step)
@@ -86,19 +77,15 @@ def generate_quote(
     bid_pre_d = fair_d - half_d + delta_d
     ask_pre_d = fair_d + half_d - delta_d
 
-    # info debug (converties en float à la fin)
     center_skewed_d = (bid_pre_d + ask_pre_d) / Decimal("2")
 
     step = _step_from(tick, bucket_size)
 
-    # precise rounding to multiples of `step`
     bid_d = _round_to_step_half_up(bid_pre_d, step)
     ask_d = _round_to_step_half_up(ask_pre_d, step)
 
-    # enforce minimal separation
     bid_d, ask_d = _ensure_min_separation_decimal(bid_d, ask_d, step)
 
-    # sizes: clamp to min
     qsz = float(quote_size)
     msz = float(min_quote_size or 0.0)
     final_sz = qsz if qsz >= msz else msz

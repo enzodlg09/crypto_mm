@@ -31,7 +31,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import math
 
-# --- imports robustes (module OU exécution directe) ---
 try:
     from .core.config import Settings, load_settings
     from .core.clock import Clock
@@ -87,7 +86,7 @@ def _squelch_console_logging():
 
     modified: list[tuple[logging.Logger, logging.Handler, object]] = []
     try:
-        all_names = [""] + [n for n in logging.root.manager.loggerDict.keys()]  # type: ignore[attr-defined]
+        all_names = [""] + [n for n in logging.root.manager.loggerDict.keys()]
         for name in all_names:
             lg = logging.getLogger(name)
             for h in list(getattr(lg, "handlers", [])):
@@ -461,7 +460,7 @@ async def _sim_live_async(
     # Pas de logs bruts dans la TTY (on désactive tout < CRITICAL et on reroute)
     with _squelch_console_logging():
         from .data.trade_tape import TradeTape
-        from .ui.live_view import UiFill  # pour pousser les fills dans l'UI
+        from .ui.live_view import UiFill
 
         lg = get_logger("sim-live", settings.log_level)
         client = KrakenWSV2Client(settings=settings, logger=lg)

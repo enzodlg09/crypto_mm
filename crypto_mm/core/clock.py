@@ -37,12 +37,12 @@ class Clock:
 
         Parameters
         ----------
-        duration_s : float or None
-            Run for this duration (seconds). If None, use `iterations`.
+        duration_s : float ou None
+            Joue pour ce temps
         iterations : int or None
-            Run for a fixed number of ticks. If None, use `duration_s`.
+            Joue pour un nombre fixe de tick, si none durartion_s.
         on_tick : callable
-            Callback(tick_index, dt_ms) invoked each tick.
+            Callback(tick_index, dt_ms) appelle chaque tick.
         """
         start = time.perf_counter()
         next_t = start + self._period_s

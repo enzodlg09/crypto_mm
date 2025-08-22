@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-"""
-TTY Live UI (single-window, ~500ms refresh).
-
-Left panel  : Order book (top10 cumulative) + Spread/Mid/Microprice
-              + Exec-spread KPIs + Ladder summary
-              + STRATEGY: PnL R/U/T, Position/AvgPx/Exposure, Inventory sparkline, last simulated fills
-Right panel : LAST 10 TRADES — aligned table: tsZ | type | side | qty | price
-"""
 
 import sys
 import time
@@ -24,7 +16,6 @@ from ..data.order_book import OrderBookL2
 from ..data.trade_tape import TradeTape, TradeRecord
 from ..mm.spread_kpi import KpiStore, spread_for_size
 
-# ============================== Models ==========================================
 
 SPARK_BARS = "▁▂▃▄▅▆▇█"
 

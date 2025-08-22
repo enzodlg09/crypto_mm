@@ -4,26 +4,16 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="da36cbe6-0af8-4316-a605-c4dd6208fdbc" name="Changes" comment="ui before cleaning">
-      <change afterPath="$PROJECT_DIR$/crypto_mm/data/sample.jsonl" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/crypto_mm/data/sinks.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/crypto_mm/mm/inventory.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/crypto_mm/risk/limits.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/crypto_mm/sim/replay.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_inventory.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_limits.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_replay_integration.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tests/test_sinks.py" afterDir="false" />
+    <list default="true" id="da36cbe6-0af8-4316-a605-c4dd6208fdbc" name="Changes" comment="V0 of the project">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Makefile" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/core/clock.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/core/clock.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/core/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/core/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/data/sinks.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/data/sinks.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crypto_mm/data/ws_client.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/data/ws_client.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/crypto_mm/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/crypto_mm/mm/quoting.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/mm/quoting.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/crypto_mm/mm/spread_kpi.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/mm/spread_kpi.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/crypto_mm/sim/execution.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/sim/execution.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" beforeDir="false" afterPath="$PROJECT_DIR$/crypto_mm/ui/live_view.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_execution.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_execution.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -148,7 +138,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1755441197825</updated>
-      <workItem from="1755441203136" duration="52757000" />
+      <workItem from="1755441203136" duration="53775000" />
     </task>
     <task id="LOCAL-00001" summary="test">
       <option name="closed" value="true" />
@@ -190,7 +180,15 @@
       <option name="project" value="LOCAL" />
       <updated>1755699985541</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="V0 of the project">
+      <option name="closed" value="true" />
+      <created>1755872962693</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1755872962693</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -201,7 +199,8 @@
     <MESSAGE value="stream data orderbook, restart from 7" />
     <MESSAGE value="ui done" />
     <MESSAGE value="ui before cleaning" />
-    <option name="LAST_COMMIT_MESSAGE" value="ui before cleaning" />
+    <MESSAGE value="V0 of the project" />
+    <option name="LAST_COMMIT_MESSAGE" value="V0 of the project" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/crypto_mm$main.coverage" NAME="main Coverage Results" MODIFIED="1755446766518" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="true" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/crypto_mm" />

@@ -125,7 +125,7 @@ class RotatingCsvSink:
 
     def write_rows(self, rows: Iterable[Dict[str, Any]]) -> Path:
         """
-        Écrit un batch dans un nouveau fichier-part atomique. Retourne le chemin final.
+        Écrit un batch dans un nouveau fichier-part. Retourne le chemin final.
         Filtre les doublons de ts (si colonne 'ts' présente).
         """
         self.rot._roll_if_needed()
@@ -134,7 +134,6 @@ class RotatingCsvSink:
         final = self.rot.base_dir / f"{day}_{self.rot.stream}_{seq:05d}.csv"
         tmp = final.with_suffix(final.suffix + f".{uuid.uuid4().hex}.tmp")
 
-        # Prépare lignes CSV en mémoire (petits batches typiques)
         lines: List[str] = []
         w = csv.DictWriter  # juste pour connaître l'ordre
         if self.include_header_each_part:
@@ -159,7 +158,6 @@ class RotatingCsvSink:
         data = "".join(lines).encode("utf-8")
         _atomic_write_bytes(tmp, final, data)
 
-        # fsync du dossier pour solidifier le rename (optionnel)
         if self.fsync:
             try:
                 dfd = os.open(str(self.rot.base_dir), os.O_RDONLY)
@@ -211,11 +209,9 @@ class RotatingParquetSink:
                     continue
             materialized.append(self.schema.normalize_row(r))
         if not materialized:
-            # rien à écrire: retourner un path "final" inexistant pour signaler no-op
             return final
 
         df = pd.DataFrame(materialized, columns=self.schema.columns)
-        # Applique dtypes pandas s'ils sont fournis
         for col, dt in (self.schema.dtypes or {}).items():
             if col in df.columns:
                 try:
@@ -223,7 +219,6 @@ class RotatingParquetSink:
                 except Exception:
                     pass
 
-        # écriture temp -> rename (parquet gère les headers/types)
         df.to_parquet(tmp, index=False)
         os.replace(tmp, final)
         # fsync du dossier
